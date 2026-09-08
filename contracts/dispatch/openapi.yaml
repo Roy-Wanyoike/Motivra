@@ -1,0 +1,351 @@
+openapi: 3.0.3
+info:
+  title: Motivra Dispatch Scoring API
+  version: 1.0.0
+  description: |
+    Explainable multi-factor dispatch scoring (docs: backend/dispatch/README.md).
+    The engine is stateless and deterministic: the same candidate set, job
+    context and weights always produce the same scores, in the same order,
+    with the same human-readable reasons. It recommends; it never assigns.
+
+    All endpoints require a Bearer access token issued by the identity
+    service (HS256) with one of the roles DISPATCHER, ADMIN or SUPER_ADMIN.
+    Errors are RFC 7807-style `application/problem+json`.
+servers:
+  - url: /
+tags:
+  - name: dispatch
+    description: Explainable dispatch scoring
+security:
+  - bearerAuth: []
+paths:
+  /v1/dispatch/score:
+    post:
+      operationId: scoreDispatchCandidates
+      summary: Score a candidate set against a job
+      description: |
+        Scores every candidate against the job context and returns the
+        results sorted by total score descending (ties broken by ascending
+        technician ID). Each score itemises all six factors with their
+        weight, raw metric, normalized 0-1 value and a human-readable
+        reason, plus the top reasons by contribution.
+
+        Weights are optional; when omitted the engine applies its default
+        weight set. A provided weight set must contain non-negative values
+        summing to 1.0. The candidate list is capped at 200 entries; the
+        engine is advisory only and never assigns or reassigns a job.
+      tags: [dispatch]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoreRequest'
+      responses:
+        '200':
+          description: Scores computed. The applied weights are echoed in the response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScoreResponse'
+        '401':
+          description: Missing, invalid or malformed authentication.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller role is not DISPATCHER, ADMIN or SUPER_ADMIN.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation failure (weight sum, candidate ranges or caps, label sizes).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/dispatch/factors:
+    get:
+      operationId: listDispatchFactors
+      summary: List the scoring factor catalogue
+      description: |
+        Returns every factor the engine scores, its semantics and its
+        default weight. The catalogue is static: the engine has no hidden
+        factors and no opaque penalties.
+      tags: [dispatch]
+      responses:
+        '200':
+          description: The factor catalogue and the default weight set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactorCatalogueResponse'
+        '401':
+          description: Authentication required.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Caller role is not DISPATCHER, ADMIN or SUPER_ADMIN.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ScoreRequest:
+      type: object
+      required: [job_context, candidates]
+      properties:
+        job_context:
+          $ref: '#/components/schemas/JobContext'
+        candidates:
+          type: array
+          description: Technicians under consideration. Capped at 200 entries.
+          items:
+            $ref: '#/components/schemas/Candidate'
+          minItems: 1
+          maxItems: 200
+        weights:
+          description: |
+            Optional per-factor weights. All values must be non-negative and
+            sum to 1.0; omitted to use the engine defaults.
+          $ref: '#/components/schemas/Weights'
+    JobContext:
+      type: object
+      description: The job being staffed. Empty lists are "no constraint" and never penalize a candidate.
+      required: [required_skills, vehicle_make, required_parts]
+      properties:
+        required_skills:
+          type: array
+          description: Skill labels the job needs, e.g. "engine", "electrical", "brakes". At most 50 entries of 64 characters.
+          items:
+            type: string
+        vehicle_make:
+          type: string
+          description: Vehicle make to match against technician ratings. Empty means no make constraint.
+        required_parts:
+          type: array
+          description: Parts the job needs on the van. At most 50 entries of 64 characters.
+          items:
+            type: string
+    Candidate:
+      type: object
+      required:
+        - technician_id
+        - distance_km
+        - eta_minutes
+        - available
+        - has_equipment
+        - has_required_parts
+        - completed_jobs
+        - acceptance_rate
+        - completion_rate
+        - avg_customer_rating
+        - declined_last
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+          description: Non-zero identifier of the technician.
+        distance_km:
+          type: number
+          format: double
+          minimum: 0
+          description: Straight-line or routed distance to the job, in kilometres. Reported in reasons; the ETA drives the score.
+        eta_minutes:
+          type: integer
+          minimum: 0
+          description: Estimated minutes until on site.
+        skills:
+          type: array
+          description: Skills the technician holds. At most 50 entries of 64 characters.
+          items:
+            type: string
+        vehicle_makes:
+          type: array
+          description: Vehicle makes the technician is rated on.
+          items:
+            type: string
+        available:
+          type: boolean
+          description: Whether the technician can take new work now.
+        has_equipment:
+          type: boolean
+          description: Whether the required tools are on the van.
+        has_required_parts:
+          type: boolean
+          description: Whether the van carries the full required-parts list.
+        completed_jobs:
+          type: integer
+          minimum: 0
+          description: Lifetime completed job count, surfaced in reasons.
+        acceptance_rate:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Share of offered jobs the technician accepted.
+        completion_rate:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Share of accepted jobs the technician completed.
+        avg_customer_rating:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 5
+          description: Average customer rating out of 5.
+        declined_last:
+          type: boolean
+          description: Whether the technician declined the previous dispatch offer.
+    Weights:
+      type: object
+      description: Per-factor weights. Non-negative and summing to 1.0.
+      required: [technical_fit, proximity, availability, equipment, parts, performance]
+      properties:
+        technical_fit:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        proximity:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        availability:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        equipment:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        parts:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        performance:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+    ScoreResponse:
+      type: object
+      required: [weights, scores]
+      properties:
+        weights:
+          $ref: '#/components/schemas/Weights'
+        scores:
+          type: array
+          description: Scores sorted by total descending, ties broken by ascending technician ID.
+          items:
+            $ref: '#/components/schemas/Score'
+    Score:
+      type: object
+      required: [technician_id, total, factors, top_reasons]
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+        total:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Weighted factor sum, rounded to 4 decimal places.
+        factors:
+          type: array
+          description: All six factors, always present and always in the same order.
+          items:
+            $ref: '#/components/schemas/Factor'
+        top_reasons:
+          type: array
+          description: Up to three factor explanations ordered by contribution (weight x normalized value) descending.
+          items:
+            type: string
+    Factor:
+      type: object
+      required: [name, weight, raw, normalized, reason]
+      properties:
+        name:
+          type: string
+          enum: [technical_fit, proximity, availability, equipment, parts, performance]
+        weight:
+          type: number
+          format: double
+          description: The weight applied to this factor in this scoring call.
+        raw:
+          type: number
+          format: double
+          description: The un-normalized metric (for example the ETA in minutes, or the boolean readiness signal).
+        normalized:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: The 0-1 value that was actually weighted, rounded to 4 decimal places.
+        reason:
+          type: string
+          description: Human-readable explanation naming the inputs, e.g. "matches 2/2 required skills (engine, brakes); rated on Toyota".
+    FactorCatalogueResponse:
+      type: object
+      required: [factors, default_weights]
+      properties:
+        factors:
+          type: array
+          items:
+            $ref: '#/components/schemas/FactorInfo'
+        default_weights:
+          $ref: '#/components/schemas/Weights'
+    FactorInfo:
+      type: object
+      required: [name, description, default_weight]
+      properties:
+        name:
+          type: string
+          enum: [technical_fit, proximity, availability, equipment, parts, performance]
+        description:
+          type: string
+        default_weight:
+          type: number
+          format: double
+    Error:
+      type: object
+      description: RFC 7807-style problem detail (application/problem+json).
+      required: [code, title]
+      properties:
+        code:
+          type: string
+          description: Stable machine code, e.g. validation_failed.
+        title:
+          type: string
+        detail:
+          type: string
+        errors:
+          type: array
+          description: Per-field issues, when applicable.
+          items:
+            $ref: '#/components/schemas/FieldError'
+    FieldError:
+      type: object
+      required: [field, issue]
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
