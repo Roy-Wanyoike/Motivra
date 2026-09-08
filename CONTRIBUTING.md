@@ -28,3 +28,7 @@ Coming with Wave 1 (platform foundation): `make dev` boots Postgres, Redis, NATS
 ## Questions
 
 Open a discussion or pick up a [`good first issue`](https://github.com/Roy-Wanyoike/Motivra/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+
+## License and Developer Certificate of Origin (DCO)
+
+Motivra is licensed under the [Apache License 2.0](LICENSE). By contributing, you agree your contributions are licensed under the same terms. Every commit must carry a [DCO 1.1](https://developercertificate.org/) sign-off — simply commit with `git commit -s` (e.g. `git commit -s -m "feat(vehicles): add VIN resolution"`), which appends a `Signed-off-by: Your Name <you@example.com>` line certifying you have the right to submit the work under Apache-2.0. No CLA is required.
