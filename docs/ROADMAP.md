@@ -2,7 +2,7 @@
 
 Waves sequence the build. Between waves, integration windows pause feature work for E2E, migration, security and load validation. Status lives here; progress is tracked in issues.
 
-## Wave 0 — Discovery & architecture (current)
+## Wave 0 — Discovery & architecture (DONE — PRs #8, #9)
 
 **Goal:** the rules other waves follow.
 
@@ -11,7 +11,7 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 - Business glossary; issue taxonomy; definition of done
 - **Exit criteria:** CI gates enforce on every PR; ADRs merged; templates live
 
-## Wave 1 — Foundation
+## Wave 1 — Foundation (DONE — PRs #15, #16)
 
 **Goal:** shared platform primitives.
 
@@ -20,7 +20,7 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 - Observability backbone: metrics, logs, traces, dashboards, alerts
 - **Exit criteria:** a service template spawns a production-shaped service in <1 day; identity issues tokens that every context accepts
 
-## Wave 2 — Vehicle foundation
+## Wave 2 — Vehicle foundation (CORE MERGED — PR #17; tenant-scoping hardening next)
 
 - Vehicle registry (canonical identity, VIN resolution), components, mileage
 - Append-only service history; Vehicle Passport read model
@@ -33,7 +33,7 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 - Pre-purchase inspection flow (Motivra Inspect wedge)
 - **Exit criteria:** inspector completes an inspection offline; report verifies against evidence
 
-## Wave 4 — Mobile garage
+## Wave 4 — Mobile garage (BACKEND CORE MERGED — PRs #21, #20; client apps next)
 
 - Jobs & service request engine (full state machine, extensive tests)
 - Dispatch engine with explainable scoring (fit, distance, equipment, inventory, performance)
