@@ -255,6 +255,18 @@ func (s *Service) Accept(ctx context.Context, jobID uuid.UUID, technicianID uuid
 	})
 }
 
+// GetJob returns the job with the given id, or an error wrapping
+// ErrJobNotFound when it does not exist. Read path for the HTTP layer.
+func (s *Service) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
+	return s.store.GetJob(ctx, id)
+}
+
+// Transitions returns the job's append-only transition audit trail in
+// chronological order (oldest first). Read path for the HTTP layer.
+func (s *Service) Transitions(ctx context.Context, jobID uuid.UUID) ([]JobTransition, error) {
+	return s.store.ListTransitions(ctx, jobID)
+}
+
 // JobsByStatus lists jobs in the given status, newest first, with the
 // service's pagination discipline (defaults and caps).
 func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset int) ([]Job, error) {

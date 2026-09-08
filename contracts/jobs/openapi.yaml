@@ -1,0 +1,498 @@
+openapi: 3.0.3
+info:
+  title: Motivra Jobs API
+  version: 1.0.0
+  description: |
+    Service requests, the job state machine and technician assignments.
+
+    Jobs move through an 18-status machine enforced server-side
+    (CREATED, TRIAGING, DISPATCHING, ASSIGNED, ACCEPTED, EN_ROUTE, ARRIVED,
+    INSPECTION, DIAGNOSIS, ESTIMATE, AWAITING_APPROVAL, APPROVED, REPAIRING,
+    VERIFICATION, COMPLETED, CANCELLED, FAILED, ESCALATED). Every successful
+    move is recorded in an append-only transition log. Repair work can start
+    only after customer approval (APPROVED); terminal states are immutable.
+
+    All endpoints require a Bearer access token issued by the identity
+    service (HS256). Errors are RFC 7807-style `application/problem+json`.
+
+servers:
+  - url: /
+tags:
+  - name: requests
+    description: Customer-facing service request intake
+  - name: jobs
+    description: Job lifecycle, dispatch and audit
+security:
+  - bearerAuth: []
+paths:
+  /v1/requests:
+    post:
+      operationId: createServiceRequest
+      summary: Create a service request
+      description: |
+        Records a new customer-reported service request in status
+        `received`. The authenticated user becomes the customer. Publishes
+        `request.received.v1`.
+      tags: [requests]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateServiceRequestInput'
+      responses:
+        '201':
+          description: Request created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/requests/{requestID}/job:
+    post:
+      operationId: createJobFromRequest
+      summary: Convert a service request into a job
+      description: |
+        Converts a request in status `received` into a job in status
+        `CREATED` and marks the request `converted`. A request can produce
+        exactly one job; a second attempt conflicts (409). Publishes
+        `job.created.v1`.
+      tags: [requests]
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '201':
+          description: Job created from the request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/jobs:
+    get:
+      operationId: listJobsByStatus
+      summary: List jobs by status
+      description: |
+        Returns jobs in the given status, newest first. Requires one of the
+        DISPATCHER, ADMIN or SUPER_ADMIN roles. The status query parameter
+        must be one of the 18 documented statuses.
+      tags: [jobs]
+      parameters:
+        - name: status
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/JobStatus'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Jobs in the requested status (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/jobs/{jobID}:
+    get:
+      operationId: getJob
+      summary: Fetch one job
+      tags: [jobs]
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/jobs/{jobID}/transitions:
+    get:
+      operationId: listJobTransitions
+      summary: Read the transition audit trail
+      description: |
+        Returns the append-only transition log for the job, oldest first.
+        Rows are never updated or deleted.
+      tags: [jobs]
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200':
+          description: Chronological audit trail (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/JobTransition'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      operationId: transitionJob
+      summary: Move a job through the state machine
+      description: |
+        Applies a status transition. Requires one of the DISPATCHER, ADMIN
+        or SUPER_ADMIN roles; the server-side state machine has the final
+        say and rejects illegal moves with 409. The move and its audit row
+        are written in one transaction; success publishes
+        `job.status.changed.v1`.
+      tags: [jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionRequest'
+      responses:
+        '200':
+          description: Updated job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/jobs/{jobID}/assignments:
+    post:
+      operationId: assignTechnician
+      summary: Dispatch a technician to a job
+      description: |
+        Assigns the technician to the job (status DISPATCHING; an ASSIGNED
+        job is reassigned by stepping back through DISPATCHING first).
+        Requires one of the DISPATCHER, ADMIN or SUPER_ADMIN roles. The
+        caller is recorded as `assigned_by` in the assignment and audit
+        rows; success publishes `job.assigned.v1`.
+      tags: [jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignmentRequest'
+      responses:
+        '201':
+          description: Updated job carrying the assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/jobs/{jobID}/accept:
+    post:
+      operationId: acceptAssignment
+      summary: Accept the assignment
+      description: |
+        The authenticated TECHNICIAN accepts the job's assignment: the job
+        moves ASSIGNED -> ACCEPTED, the assignment row is stamped with
+        `accepted_at` and `job.status.changed.v1` is published. The token
+        subject must match the assigned technician.
+      tags: [jobs]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '204':
+          description: Assignment accepted; no body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+components:
+  parameters:
+    RequestID:
+      name: requestID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobID:
+      name: jobID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Unauthorized:
+      description: Missing, invalid or expired access token.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Authenticated but the role is not allowed for this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: State conflict (illegal transition, double conversion, assignment mismatch).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Request body or query parameters are invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    JobStatus:
+      type: string
+      enum:
+        - CREATED
+        - TRIAGING
+        - DISPATCHING
+        - ASSIGNED
+        - ACCEPTED
+        - EN_ROUTE
+        - ARRIVED
+        - INSPECTION
+        - DIAGNOSIS
+        - ESTIMATE
+        - AWAITING_APPROVAL
+        - APPROVED
+        - REPAIRING
+        - VERIFICATION
+        - COMPLETED
+        - CANCELLED
+        - FAILED
+        - ESCALATED
+      description: |
+        The 18 job statuses. Legal moves are enforced server-side;
+        COMPLETED, CANCELLED and FAILED are terminal.
+    RequestStatus:
+      type: string
+      enum: [received, converted, cancelled]
+    CreateServiceRequestInput:
+      type: object
+      required: [description]
+      properties:
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Vehicle the request is about, when known.
+        description:
+          type: string
+          minLength: 1
+          description: Free-text problem report. Required.
+        location_lat:
+          type: number
+          format: double
+          nullable: true
+          minimum: -90
+          maximum: 90
+        location_lng:
+          type: number
+          format: double
+          nullable: true
+          minimum: -180
+          maximum: 180
+        address_text:
+          type: string
+          nullable: true
+          description: Free-text pickup address.
+    ServiceRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+        description:
+          type: string
+        location_lat:
+          type: number
+          format: double
+          nullable: true
+        location_lng:
+          type: number
+          format: double
+          nullable: true
+        address_text:
+          type: string
+        status:
+          $ref: '#/components/schemas/RequestStatus'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_request_id:
+          type: string
+          format: uuid
+          nullable: true
+        customer_id:
+          type: string
+          format: uuid
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        problem_summary:
+          type: string
+        technician_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    JobTransition:
+      type: object
+      description: One append-only audit row of a job status move.
+      properties:
+        id:
+          type: integer
+          format: int64
+        job_id:
+          type: string
+          format: uuid
+        from_status:
+          $ref: '#/components/schemas/JobStatus'
+        to_status:
+          $ref: '#/components/schemas/JobStatus'
+        actor_id:
+          type: string
+          format: uuid
+          nullable: true
+        reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    TransitionRequest:
+      type: object
+      required: [to]
+      properties:
+        to:
+          $ref: '#/components/schemas/JobStatus'
+        reason:
+          type: string
+          description: Free-text reason recorded in the audit trail.
+    AssignmentRequest:
+      type: object
+      required: [technician_id]
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+    Error:
+      type: object
+      description: RFC 7807-style problem document (application/problem+json).
+      required: [code, title]
+      properties:
+        code:
+          type: string
+          example: conflict
+        title:
+          type: string
+          example: Conflict with current state
+        detail:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
