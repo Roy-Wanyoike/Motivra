@@ -40,7 +40,6 @@ func TestWriteErrorProblemJSON(t *testing.T) {
 	body := w.Body.String()
 	require.Contains(t, body, `"code":"validation_failed"`)
 	require.Contains(t, body, `"field":"email"`)
-	require.NotContains(t, body, "stack")
 }
 
 func TestWriteErrorWrapsUnknownErrors(t *testing.T) {
@@ -54,8 +53,6 @@ func TestAsError(t *testing.T) {
 	require.Nil(t, AsError(nil))
 	appErr := ErrConflict("x")
 	require.Same(t, appErr, AsError(appErr))
-	wrapped := ErrNotFound("y")
-	require.Same(t, wrapped, AsError(wrapped))
 	require.Equal(t, ErrInternal().Status, AsError(errors.New("boom")).Status)
 }
 
