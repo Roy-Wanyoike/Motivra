@@ -1,0 +1,27 @@
+# --- Binaries ---
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# --- Test and coverage artifacts ---
+*.test
+coverage.out
+
+# --- Local environment files: never commit secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Logs ---
+*.log
+
+# --- Editor and OS noise ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- We do NOT vendor dependencies ---
+vendor/

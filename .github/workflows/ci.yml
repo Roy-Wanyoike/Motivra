@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          args: --timeout 5m
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: motivra
+          POSTGRES_PASSWORD: motivra
+          POSTGRES_DB: motivra_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://motivra:motivra@localhost:5432/motivra_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://motivra:motivra@localhost:5432/motivra_test?sslmode=disable
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        # -tags tools loads the root package (tools.go), which proves the
+        # pinned shared dependencies compile and keeps ./... non-empty while
+        # the skeleton has no other Go sources.
+        run: go build -tags tools ./...
+
+      - name: Vet
+        run: go vet -tags tools ./...
+
+      - name: Test with coverage
+        run: go test -race -tags tools -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage summary
+        run: |
+          if [ -f coverage.out ]; then
+            go tool cover -func=coverage.out | tail -1
+          else
+            echo "No coverage profile yet (no Go test packages in the skeleton). Threshold enforcement lands with the first real code."
+          fi
+
+  migrations:
+    name: Migration validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate migrations
+        run: bash scripts/validate_migrations.sh

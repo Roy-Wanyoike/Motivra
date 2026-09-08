@@ -1,0 +1,92 @@
+# Local development dependencies ONLY — this is not production configuration.
+# Managed via `make dev` / `make dev-temporal` / `make dev-down`.
+# The Temporal server and UI live behind the `temporal` profile; the base
+# stack (postgres, redis, nats, minio) starts without any profile.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: motivra
+      POSTGRES_PASSWORD: motivra
+      POSTGRES_DB: motivra
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U motivra"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  nats:
+    image: nats:2.10-alpine
+    command: "-js"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+
+  minio:
+    image: minio/minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: motivra
+      MINIO_ROOT_PASSWORD: motivra-dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  # --- Temporal profile (make dev-temporal) ---
+
+  temporal-db:
+    image: postgres:16-alpine
+    profiles: ["temporal"]
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-db-data:/var/lib/postgresql/data
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    profiles: ["temporal"]
+    depends_on:
+      - temporal-db
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-db
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    profiles: ["temporal"]
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
+  redis-data:
+  nats-data:
+  minio-data:
+  temporal-db-data:
