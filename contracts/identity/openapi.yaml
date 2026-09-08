@@ -1,0 +1,371 @@
+openapi: 3.0.3
+info:
+  title: Motivra Identity API
+  version: 1.0.0
+  description: |
+    Authentication and account management for Motivra (ADR-0004 security
+    baseline). Access tokens are short-lived HS256 JWTs (15 minutes) issued
+    by this service; refresh tokens are opaque 256-bit strings (30 days,
+    rotated on every use, stored only as keyed HMAC-SHA256 digests). All
+    error responses use RFC 7807-style application/problem+json bodies.
+servers:
+  - url: /
+    description: Same-origin deployment behind the platform gateway.
+tags:
+  - name: auth
+    description: Token issuance, rotation and revocation.
+  - name: users
+    description: Authenticated account access and admin listing.
+paths:
+  /v1/auth/register:
+    post:
+      operationId: register
+      tags: [auth]
+      summary: Create an account and receive the first token pair
+      description: >
+        Emails are stored lowercased; a CUSTOMER role is granted initially.
+        Duplicate emails (case-insensitive) and duplicate phone numbers
+        yield 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created; token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessResponse'
+        '409':
+          description: Email or phone already registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation failed (email format, password policy, missing name).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Authenticate with email and password
+      description: >
+        Unknown emails and wrong passwords return the identical 401 body so
+        account existence is never disclosed. Suspended or deleted accounts
+        return 403 only after the password has been verified.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated; fresh token pair issued and audited.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessResponse'
+        '401':
+          description: Invalid credentials.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Account is not active.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Malformed request body.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/auth/refresh:
+    post:
+      operationId: refresh
+      tags: [auth]
+      summary: Rotate a refresh session
+      description: >
+        Presents an opaque refresh token and receives a fresh pair. The
+        presented session is revoked (rotation); reuse of a rotated, revoked
+        or expired token returns 401.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: New token pair issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessResponse'
+        '401':
+          description: Unknown, revoked, reused or expired refresh token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Account is not active.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Malformed request body.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Revoke the session behind a refresh token
+      description: >
+        Possession of the refresh token is the logout credential. Returns
+        204 on success; unknown or already-revoked tokens return 401 so the
+        endpoint never reveals session state. Revocation is audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LogoutRequest'
+      responses:
+        '204':
+          description: Session revoked.
+        '401':
+          description: Unknown or already-revoked refresh token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Missing refresh_token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/users/me:
+    get:
+      operationId: getProfile
+      tags: [users]
+      summary: Get the authenticated caller's profile
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The caller's profile. Credential material is never returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: The token subject no longer exists.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/admin/users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      summary: List accounts (ADMIN or SUPER_ADMIN)
+      description: Newest-first, offset-based pagination. limit is clamped to
+        1-100 (default 20); offset floors at 0.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: One page of accounts with their roles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Caller lacks ADMIN or SUPER_ADMIN.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: limit or offset is not an integer.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: HS256 access token issued by /v1/auth/login or /v1/auth/register.
+  schemas:
+    AccessResponse:
+      type: object
+      required: [access_token, refresh_token, expires_at]
+      properties:
+        access_token:
+          type: string
+          description: HS256 JWT (15 minutes) carrying sub, tenant_id, role, roles, sid, iss, aud, iat, exp.
+        refresh_token:
+          type: string
+          description: Opaque 256-bit base64url token (30 days), rotated on every refresh.
+        expires_at:
+          type: string
+          format: date-time
+          description: Absolute expiry of the access token.
+    RegisterRequest:
+      type: object
+      required: [email, password, full_name]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          description: Optional; E.164 recommended. Unique when present.
+        password:
+          type: string
+          minLength: 10
+          maxLength: 128
+          description: Argon2id-hashed server-side (64 MB, t=3, p=4); never stored or logged in plaintext.
+        full_name:
+          type: string
+          minLength: 1
+        device_name:
+          type: string
+          description: Optional device label recorded on the first session.
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        device_name:
+          type: string
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+    LogoutRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+    Role:
+      type: string
+      enum: [CUSTOMER, TECHNICIAN, DISPATCHER, GARAGE, FLEET_ADMIN, SUPPORT, FINANCE, ADMIN, SUPER_ADMIN]
+    UserStatus:
+      type: string
+      enum: [active, suspended, deleted]
+    User:
+      type: object
+      required: [id, email, phone, full_name, status, roles, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+          description: Empty when absent.
+        full_name:
+          type: string
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        created_at:
+          type: string
+          format: date-time
+    UserList:
+      type: object
+      required: [users, limit, offset]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        limit:
+          type: integer
+        offset:
+          type: integer
+    Problem:
+      type: object
+      description: RFC 7807-style error (application/problem+json).
+      required: [code, title]
+      properties:
+        code:
+          type: string
+          description: Stable machine code, e.g. validation_failed, unauthorized, conflict.
+        title:
+          type: string
+        detail:
+          type: string
+        errors:
+          type: array
+          description: Field-level issues for validation failures.
+          items:
+            type: object
+            required: [field, issue]
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
