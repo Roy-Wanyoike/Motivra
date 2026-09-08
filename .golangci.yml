@@ -1,0 +1,42 @@
+# golangci-lint v2 configuration. Minimal but real: the linters below are the
+# baseline every domain package must pass. Tighten here, not in code.
+version: "2"
+
+run:
+  timeout: 5m
+  # tools.go carries the `tools` build tag (it only pins go.mod); enable the
+  # tag here so the linter can load the module while the skeleton has no other
+  # Go sources. tools.go itself is excluded from analysis below.
+  build-tags:
+    - tools
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - misspell
+    - revive
+    - staticcheck
+    - unused
+  exclusions:
+    rules:
+      # tools.go exists only to keep the shared dependency set pinned in
+      # go.mod (build tag `tools`); it is never compiled and has no logic.
+      - path: tools\.go
+        linters:
+          - errcheck
+          - govet
+          - misspell
+          - revive
+          - staticcheck
+          - unused
+
+formatters:
+  enable:
+    - gofumpt
+  exclusions:
+    rules:
+      - path: tools\.go
+        formatters:
+          - gofumpt
