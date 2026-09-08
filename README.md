@@ -254,7 +254,7 @@ Execution proceeds in waves with integration windows between them — no continu
 | 1 | Foundation | Platform primitives, identity & RBAC, observability backbone | **Done** (PRs #15, #16) |
 | 2 | Vehicle foundation | Registry, passport, append-only history | **Core merged** (PR #17); tenant scoping hardening next |
 | 3 | Inspection | Templates, evidence capture, verified reports | Planned |
-| 4 | Mobile garage | Jobs, dispatch engine, technician app, estimates | **Backend core merged** (PRs #21, #20); client apps next |
+| 4 | Mobile garage | Jobs, dispatch engine, technician app, estimates | **Backend core merged** (PRs #21, #20); web foundation merged (PR #35); technician app tracked (#29) |
 | 5 | Money | Payments (M-Pesa first), ledger, warranties | Planned |
 | 6 | Network | Parts, garages, towing & roadside | Planned |
 | 7 | B2B | Fleet, dealer, developer platform & APIs | Planned |
@@ -268,4 +268,4 @@ The build is issue-driven: every meaningful feature starts as a GitHub issue, ev
 
 ## License
 
-Licensing (open-source vs open-core vs proprietary) is an open decision tracked in the issues — it lands before the first external contribution merges.
+Motivra is licensed under **Apache-2.0** (see [LICENSE](LICENSE)); contributions require a [DCO sign-off](CONTRIBUTING.md#license-and-developer-certificate-of-origin-dco). The decision record — alternatives considered, and the revisit trigger before the Money wave — is [ADR-0006](docs/adr/0006-license-and-contributions.md).
