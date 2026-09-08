@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/*
+ * Accessible keyboard focus (issue #24): a high-contrast outline that only
+ * appears for focus-visible (keyboard) focus, never for pointer focus.
+ */
+:focus-visible {
+  outline: 3px solid #b45309;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/*
+ * Respect users who prefer reduced motion (issue #24 a11y requirement):
+ * collapse animations/transitions and disable smooth scrolling.
+ */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
