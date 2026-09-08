@@ -63,14 +63,14 @@ func main() {
 	cleanups = append(cleanups, stopMetrics, stopTracing)
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
+	opts = append(opts, platform.WithMiddleware(platform.AuthMiddleware(validator)))
 	srv := platform.NewServer(cfg, logger, opts...)
-	srv.Router.Use(platform.AuthMiddleware(validator))
-	srv.Router.With(platform.RequireAuthenticated).Get("/v1/ping", func(w http.ResponseWriter, r *http.Request) {
+	srv.Router.Get("/v1/ping", platform.RequireAuthenticated(func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := platform.ClaimsFromContext(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(platform.LogJSON(map[string]string{"pong": claims.UserID})))
-	})
+	}))
 
 	httpSrv := &http.Server{
 		Addr:              ":" + cfg.App.Port,

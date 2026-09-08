@@ -13,6 +13,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Postgres pool defaults tuned for a per-domain service.
@@ -64,7 +65,7 @@ func MigrateUp(ctx context.Context, pool *pgxpool.Pool, migrationsFS fs.FS, tabl
 	mCtx, cancel := context.WithTimeout(ctx, defaultMigrateTimeout)
 	defer cancel()
 
-	sqlDB := sql.OpenDB(pool.Config().ConnConfig)
+	sqlDB := sql.OpenDB(stdlib.GetConnector(*pool.Config().ConnConfig))
 	defer sqlDB.Close()
 
 	src, err := iofs.New(migrationsFS, ".")

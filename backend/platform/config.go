@@ -146,7 +146,7 @@ func (c Config) Validate() error {
 // LoadForTest returns a Config valid for unit tests (no database required).
 func LoadForTest() Config {
 	return Config{
-		App:             AppConfig{Name: "motivra-test", Env: EnvTest, Port: "0"},
+		App:             AppConfig{Name: "motivra-test", Env: EnvTest, Port: "8080"},
 		JWT:             JWTConfig{Secret: strings.Repeat("test-secret-", 4), Issuer: "motivra-identity", Audience: "motivra"},
 		ShutdownTimeout: 5 * time.Second,
 	}

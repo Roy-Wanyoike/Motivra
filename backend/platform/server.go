@@ -42,8 +42,17 @@ func WithMount(pattern string, h http.Handler) ServerOption {
 	}
 }
 
-// NewServer builds the router with the Motivra middleware chain and mounts
-// /healthz (liveness) and /readyz (readiness).
+// WithMiddleware appends a chi middleware to the chain. It must be applied
+// through NewServer options — middleware registered after routes panic.
+func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
+	return func(s *Server) {
+		s.Router.Use(mw)
+	}
+}
+
+// NewServer builds the router with the Motivra middleware chain and
+// service options first, then mounts /healthz (liveness) and /readyz
+// (readiness) last so callers never fight route-registration ordering.
 func NewServer(cfg Config, logger *slog.Logger, opts ...ServerOption) *Server {
 	s := &Server{
 		Router:   chi.NewRouter(),
@@ -57,11 +66,11 @@ func NewServer(cfg Config, logger *slog.Logger, opts ...ServerOption) *Server {
 	s.Router.Use(s.requestLogger)
 	s.Router.Use(s.recoverer)
 	s.Router.Use(middleware.Timeout(30 * time.Second))
-	s.Router.Get("/healthz", s.handleLiveness)
-	s.Router.Get("/readyz", s.handleReadiness)
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.Router.Get("/healthz", s.handleLiveness)
+	s.Router.Get("/readyz", s.handleReadiness)
 	return s
 }
 
