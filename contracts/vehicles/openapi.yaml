@@ -1,0 +1,471 @@
+openapi: 3.0.3
+info:
+  title: Motivra Vehicle Identity API
+  version: 1.0.0
+  description: |
+    Vehicle registry, append-only service history and the read-only Vehicle
+    Passport (docs/GLOSSARY.md). One vehicle, one identity.
+
+    All endpoints require a Bearer access token issued by the identity
+    service (HS256). Errors are RFC 7807-style `application/problem+json`.
+    History is append-only: corrections are new records, never edits.
+servers:
+  - url: /
+tags:
+  - name: vehicles
+    description: Vehicle identity, history and passport
+security:
+  - bearerAuth: []
+paths:
+  /v1/vehicles:
+    post:
+      operationId: registerVehicle
+      summary: Register a vehicle
+      description: |
+        Registers a vehicle owned by the authenticated user (or, when the
+        token carries a tenant claim, by the caller's organization). The VIN
+        is normalized (uppercase, separators stripped) and validated against
+        ISO 3779 including the check digit. Registration also records the
+        first append-only history event ("note": Vehicle registered on
+        Motivra) and publishes the `vehicle.created.v1` event.
+      tags: [vehicles]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVehicleRequest'
+      responses:
+        '201':
+          description: Vehicle registered. The VIN in the response is the normalized form.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vehicle'
+        '401':
+          description: Missing, invalid or malformed authentication.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: A vehicle with this VIN is already registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation failure (VIN, year of manufacture, make/model, mileage).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/vehicles/{vehicleID}:
+    get:
+      operationId: getVehicle
+      summary: Fetch one vehicle
+      tags: [vehicles]
+      parameters:
+        - $ref: '#/components/parameters/VehicleID'
+      responses:
+        '200':
+          description: The vehicle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vehicle'
+        '401':
+          description: Authentication required.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No vehicle with this identifier.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: The identifier is not a UUID.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/vehicles/{vehicleID}/passport:
+    get:
+      operationId: getVehiclePassport
+      summary: Read the Vehicle Passport
+      description: |
+        The customer-facing summary of a vehicle's verified identity,
+        assembled from the registry and its history. Read-only: the passport
+        is never edited directly.
+      tags: [vehicles]
+      parameters:
+        - $ref: '#/components/parameters/VehicleID'
+      responses:
+        '200':
+          description: The Vehicle Passport.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Passport'
+        '401':
+          description: Authentication required.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No vehicle with this identifier.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: The identifier is not a UUID.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/vehicles/{vehicleID}/history:
+    get:
+      operationId: listVehicleHistory
+      summary: List the vehicle's service history
+      description: |
+        Append-only history events, newest first (`occurred_at DESC`).
+        Pagination uses `limit` (default 50, capped at 200) and `offset`.
+      tags: [vehicles]
+      parameters:
+        - $ref: '#/components/parameters/VehicleID'
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 50; values above 200 are capped at 200.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          description: Number of events to skip. Defaults to 0.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: History events, newest first. Empty array when the vehicle has none.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HistoryEvent'
+        '401':
+          description: Authentication required.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No vehicle with this identifier (history for an unknown vehicle is empty).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid identifier or pagination parameters.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/vehicles/{vehicleID}/mileage:
+    post:
+      description: |
+        Records a new odometer reading. The odometer can never decrease; the
+        same reading may be re-recorded. The write and its history event are
+        one transaction and publish `vehicle.mileage.recorded.v1` carrying
+        the old and new readings. Only the vehicle owner or an ADMIN /
+        SUPER_ADMIN may record mileage.
+      operationId: recordVehicleMileage
+      summary: Record an odometer reading
+      tags: [vehicles]
+      parameters:
+        - $ref: '#/components/parameters/VehicleID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MileageRequest'
+      responses:
+        '204':
+          description: Reading recorded. No response body.
+        '401':
+          description: Authentication required.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Authenticated user is neither the owner nor an administrator.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No vehicle with this identifier.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The odometer cannot decrease.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Validation failure (missing or negative odometer_km).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    VehicleID:
+      name: vehicleID
+      in: path
+      required: true
+      description: Vehicle identifier (UUID).
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    Vehicle:
+      type: object
+      description: Canonical registry record for one vehicle. VIN is the normalized ISO 3779 form.
+      required:
+        - id
+        - owner_user_id
+        - vin
+        - make
+        - model
+        - year_of_manufacture
+        - mileage_latest_km
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Present when the vehicle belongs to an organization (fleet/dealer).
+        owner_user_id:
+          type: string
+          format: uuid
+        vin:
+          type: string
+          description: Normalized 17-character ISO 3779 VIN (uppercase, no separators, no I/O/Q).
+          minLength: 17
+          maxLength: 17
+          example: 1HGCM82633A004352
+        make:
+          type: string
+          example: Honda
+        model:
+          type: string
+          example: Accord
+        year_of_manufacture:
+          type: integer
+          minimum: 1950
+          maximum: 2100
+        plate:
+          type: string
+        color:
+          type: string
+        mileage_latest_km:
+          type: integer
+          format: int64
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreateVehicleRequest:
+      type: object
+      required:
+        - vin
+        - make
+        - model
+        - year_of_manufacture
+      properties:
+        vin:
+          type: string
+          description: Raw VIN as provided by the user; separators and case are normalized server-side and the ISO 3779 check digit is verified.
+          minLength: 17
+          maxLength: 19
+          example: 1hgcm82633a004352
+        make:
+          type: string
+          example: Honda
+        model:
+          type: string
+          example: Accord
+        year_of_manufacture:
+          type: integer
+          minimum: 1950
+          maximum: 2100
+        plate:
+          type: string
+        color:
+          type: string
+    HistoryEvent:
+      type: object
+      description: One append-only record in the vehicle's service history. Existing events are never mutated or deleted.
+      required:
+        - id
+        - vehicle_id
+        - event_type
+        - summary
+        - occurred_at
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        vehicle_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          enum: [service, repair, inspection, mileage, incident, modification, note]
+        summary:
+          type: string
+        evidence_ref:
+          type: string
+          description: Reference to stored evidence (photos, OBD codes, measurements), if any.
+        occurred_at:
+          type: string
+          format: date-time
+        odometer_km:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+        recorded_by:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    Passport:
+      type: object
+      description: Customer-facing, read-only summary of a vehicle assembled from the registry and its history.
+      required:
+        - id
+        - owner_user_id
+        - vin
+        - make
+        - model
+        - year_of_manufacture
+        - mileage_latest_km
+        - service_event_count
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Vehicle identifier.
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        owner_user_id:
+          type: string
+          format: uuid
+        vin:
+          type: string
+          minLength: 17
+          maxLength: 17
+        make:
+          type: string
+        model:
+          type: string
+        year_of_manufacture:
+          type: integer
+          minimum: 1950
+          maximum: 2100
+        plate:
+          type: string
+        color:
+          type: string
+        mileage_latest_km:
+          type: integer
+          format: int64
+          minimum: 0
+        service_event_count:
+          type: integer
+          format: int64
+          description: Total number of append-only history events for the vehicle.
+        last_service_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: occurred_at of the most recent history event; null when none exist.
+        created_at:
+          type: string
+          format: date-time
+    MileageRequest:
+      type: object
+      required:
+        - odometer_km
+      properties:
+        odometer_km:
+          type: integer
+          format: int64
+          minimum: 0
+          description: New odometer reading in kilometres. Must not be lower than the current reading.
+          example: 152300
+    Error:
+      type: object
+      description: RFC 7807-style problem+json body (platform.Error).
+      required:
+        - code
+        - title
+      properties:
+        code:
+          type: string
+          description: Stable machine code (validation_failed, unauthorized, forbidden, not_found, conflict, internal_error).
+          example: validation_failed
+        title:
+          type: string
+        detail:
+          type: string
+        errors:
+          type: array
+          description: Per-field issues when applicable.
+          items:
+            type: object
+            required: [field, issue]
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
