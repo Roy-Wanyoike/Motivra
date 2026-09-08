@@ -250,11 +250,11 @@ Execution proceeds in waves with integration windows between them — no continu
 
 | Wave | Focus | Key outcomes | Status |
 |---|---|---|---|
-| 0 | Discovery & architecture | ADRs, domain map, contracts, design system, roadmap | **In progress** |
-| 1 | Foundation | Platform primitives, identity & RBAC, observability backbone | Planned |
-| 2 | Vehicle foundation | Registry, passport, append-only history | Planned |
+| 0 | Discovery & architecture | ADRs, domain map, contracts, design system, roadmap | **Done** (PRs #8, #9) |
+| 1 | Foundation | Platform primitives, identity & RBAC, observability backbone | **Done** (PRs #15, #16) |
+| 2 | Vehicle foundation | Registry, passport, append-only history | **Core merged** (PR #17); tenant scoping hardening next |
 | 3 | Inspection | Templates, evidence capture, verified reports | Planned |
-| 4 | Mobile garage | Jobs, dispatch engine, technician app, estimates | Planned |
+| 4 | Mobile garage | Jobs, dispatch engine, technician app, estimates | **Backend core merged** (PRs #21, #20); client apps next |
 | 5 | Money | Payments (M-Pesa first), ledger, warranties | Planned |
 | 6 | Network | Parts, garages, towing & roadside | Planned |
 | 7 | B2B | Fleet, dealer, developer platform & APIs | Planned |

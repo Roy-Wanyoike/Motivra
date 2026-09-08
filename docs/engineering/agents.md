@@ -47,8 +47,19 @@ Zones marked "planned context" follow the bounded-context recipe in ADR-0001 and
 
 | Agent | Role | Issue | Branch | Ownership (files) | Notes | PR | Status |
 |---|---|---|---|---|---|---|---|
-| arch-01 | Principal Architect | Issue #2 | `agent/architecture/adrs` | `docs/adr`, `docs/engineering`, ARCHITECTURE.md index | — | this PR | IN_REVIEW |
-| infra-01 | DevEx/Release | Issue #3 | `agent/infra/skeleton-ci` | go.mod/go.sum, Makefile, .github/workflows, compose, scripts, zone stubs | go.mod pins shared deps; other agents must NOT edit it | pending — PR number filled by infra-01 on PR creation | IN_REVIEW |
+| arch-01 | Principal Architect (A01) | #2 | agent/architecture/adrs | docs/adr, docs/engineering, ARCHITECTURE.md index | ADR-0001..0005 + registry | #8 | MERGED |
+| infra-01 | DevEx/Release (A30/A29) | #3 | agent/infra/skeleton-ci | go.mod, CI, compose, Makefile, stubs | shared dep pinning + quality gates | #9 | MERGED |
+| platform-01 | Platform Foundation (A04) | #4 | agent/platform/foundation | backend/platform, cmd/template | coordinator-completed after 2 infra failures | #15 | MERGED |
+| identity-02 | Identity & Security (A05) | #5 | agent/identity/foundation | backend/identity, migrations, cmd, contracts | part 1 + part 2 continuation; MinPasswordLength=10, HMAC refresh | #16 | MERGED |
+| vehicles-03 | Vehicle Identity (A06-A08) | #6 | agent/vehicles/passport | backend/vehicles, migrations, cmd, contracts | part 1 recovered by coordinator; part 2 continuation | #17 | MERGED |
+| jobs-01 | Jobs Engine (A11/A12) | #18 | agent/jobs/engine | backend/jobs, migrations, cmd, contracts | 18-status machine, ~350 subtests | #21 | MERGED |
+| dispatch-01 | Dispatch Engine (A12) | #19 | agent/dispatch/scoring | backend/dispatch, cmd, contracts | explainable 6-factor scoring | #20 | MERGED |
+
+### Integration Window 1 (completed)
+
+After the Wave 4 backend-core merges, feature work paused for validation per the build directive: exhaustive state-machine matrices green, migration validator green across 10 domains, race-enabled test suite green locally, ownership-zone audits clean on every merged PR. Known deferred work is tracked in PR review notes (tenant scoping on reads, NATS publisher wiring, Postgres-gated integration tests in CI).
+
+## Status protocol
 
 ## Conflict protocol
 
