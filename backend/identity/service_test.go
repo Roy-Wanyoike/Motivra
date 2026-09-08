@@ -191,6 +191,56 @@ func TestRecordAuditRequiresFields(t *testing.T) {
 	require.NotNil(t, store.audits[0].Metadata, "nil metadata is normalized")
 }
 
+func TestListUsersPaginatesAndStripsHashes(t *testing.T) {
+	svc, _ := newTestService()
+	for i := 0; i < 3; i++ {
+		_, err := svc.Register(t.Context(), "list"+string(rune('0'+i))+"@example.com", "", "password-123", "List User", "", "")
+		require.NoError(t, err)
+	}
+
+	first, err := svc.ListUsers(t.Context(), 2, 0)
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	second, err := svc.ListUsers(t.Context(), 2, 2)
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	require.NotEqual(t, first[0].ID, second[0].ID, "pages do not overlap")
+	for _, u := range append(first, second...) {
+		require.Empty(t, u.PasswordHash)
+		require.Equal(t, []Role{RoleCustomer}, u.Roles)
+	}
+
+	// Bounds are clamped, not rejected: huge limits cap at 100, zero/negative
+	// fall back to the default, negative offsets floor at 0.
+	limited, err := svc.ListUsers(t.Context(), 1000, -5)
+	require.NoError(t, err)
+	require.Len(t, limited, 3)
+	tiny, err := svc.ListUsers(t.Context(), 0, 99)
+	require.NoError(t, err)
+	require.Empty(t, tiny)
+}
+
+func TestLogoutByRefreshToken(t *testing.T) {
+	svc, store := newTestService()
+	registered, err := svc.Register(t.Context(), "bye@example.com", "", "password-123", "Bye User", "", "")
+	require.NoError(t, err)
+	user, err := store.GetUserByEmail(t.Context(), "bye@example.com")
+	require.NoError(t, err)
+
+	require.NoError(t, svc.LogoutByRefreshToken(t.Context(), registered.RefreshToken, user.ID))
+	require.Len(t, store.auditsByAction(ActionSessionRevoked), 1)
+
+	// The revoked token cannot refresh and cannot log out again; both yield
+	// the same unauthorized error (no state disclosure).
+	_, err = svc.RefreshTokens(t.Context(), registered.RefreshToken)
+	requireUnauthorized(t, err)
+	err = svc.LogoutByRefreshToken(t.Context(), registered.RefreshToken, user.ID)
+	requireUnauthorized(t, err)
+
+	err = svc.LogoutByRefreshToken(t.Context(), "", user.ID)
+	require.Equal(t, 422, appErr(t, err).Status)
+}
+
 // mustParseUUID parses s or fails the test.
 func mustParseUUID(t *testing.T, s string) uuid.UUID {
 	t.Helper()

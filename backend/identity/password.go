@@ -15,10 +15,9 @@ import (
 
 // Password policy and argon2id parameters (ADR-0004: memory 64 MB,
 // iterations within 1-3, per-user random salt). MinPasswordLength is the
-// length-first policy floor; ADR-0004 targets a floor of 10 once existing
-// signup flows are migrated — raise the constant, nothing else changes.
+// length-first policy floor aligned with ADR-0004 (minimum 10).
 const (
-	MinPasswordLength = 8
+	MinPasswordLength = 10
 	MaxPasswordLength = 128
 
 	argon2MemoryKiB  = 64 * 1024

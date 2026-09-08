@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -76,7 +77,7 @@ func (i *Issuer) Refresh(ctx context.Context, store SessionStore, refreshToken s
 	if refreshToken == "" {
 		return AccessResponse{}, Session{}, platform.ErrUnauthorized("refresh token is invalid")
 	}
-	sum := RefreshTokenHash(refreshToken)
+	sum := i.RefreshTokenHash(refreshToken)
 	sess, err := store.GetSessionByRefreshHash(ctx, sum)
 	if err != nil {
 		if isNotFound(err) {
@@ -137,7 +138,7 @@ func (i *Issuer) issue(ctx context.Context, store SessionStore, user User, devic
 	sess := Session{
 		ID:               sessionID,
 		UserID:           user.ID,
-		RefreshTokenHash: RefreshTokenHash(refreshToken),
+		RefreshTokenHash: i.RefreshTokenHash(refreshToken),
 		DeviceName:       deviceName,
 		IPAddress:        ip,
 		ExpiresAt:        now.Add(i.refreshTTL),
@@ -226,9 +227,12 @@ func newRefreshToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// RefreshTokenHash derives the hex-encoded SHA-256 digest stored in the
-// sessions table for an opaque refresh token.
-func RefreshTokenHash(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
+// RefreshTokenHash derives the hex-encoded HMAC-SHA256 digest stored in the
+// sessions table for an opaque refresh token (ADR-0004: tokens are never
+// persisted in plaintext; the digest is keyed with the issuer secret so a
+// database leak alone cannot be cross-checked against guessed tokens).
+func (i *Issuer) RefreshTokenHash(token string) string {
+	mac := hmac.New(sha256.New, i.secret)
+	_, _ = mac.Write([]byte(token))
+	return hex.EncodeToString(mac.Sum(nil))
 }

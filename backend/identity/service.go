@@ -32,6 +32,12 @@ var emailPattern = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-z
 // maxEmailLength is the RFC 5321 limit for a forward- or reverse-path.
 const maxEmailLength = 254
 
+// Pagination bounds for the admin user listing.
+const (
+	defaultListUsersLimit = 20
+	maxListUsersLimit     = 100
+)
+
 // invalidLogin is the single error returned for unknown emails and wrong
 // passwords alike, so responses never reveal which failed.
 func invalidLogin() *platform.Error {
@@ -167,6 +173,58 @@ func (s *Service) Profile(ctx context.Context, userID uuid.UUID) (User, error) {
 	}
 	user.PasswordHash = ""
 	return user, nil
+}
+
+// ListUsers returns a newest-first page of accounts for admin console use.
+// limit is clamped to [1, 100] (default 20) and offset to >= 0. Credential
+// material is stripped from every returned user.
+func (s *Service) ListUsers(ctx context.Context, limit, offset int) ([]User, error) {
+	if limit <= 0 {
+		limit = defaultListUsersLimit
+	}
+	if limit > maxListUsersLimit {
+		limit = maxListUsersLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	users, err := s.store.ListUsers(ctx, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	for i := range users {
+		users[i].PasswordHash = ""
+	}
+	return users, nil
+}
+
+// LogoutByRefreshToken revokes the session owning the given opaque refresh
+// token and audits the revocation. Possession of the refresh token is the
+// logout credential (public endpoint); actorID attributes the audit row
+// when the caller is authenticated (zero UUID records a system actor).
+// Unknown or already-revoked tokens yield the same unauthorized error so
+// the endpoint never reveals session state.
+func (s *Service) LogoutByRefreshToken(ctx context.Context, refreshToken string, actorID uuid.UUID) error {
+	if strings.TrimSpace(refreshToken) == "" {
+		return platform.ErrValidation("refresh_token is required",
+			platform.FieldError{Field: "refresh_token", Issue: "required"})
+	}
+	sess, err := s.store.GetSessionByRefreshHash(ctx, s.issuer.RefreshTokenHash(refreshToken))
+	if err != nil {
+		if isNotFound(err) {
+			return invalidLogin()
+		}
+		return fmt.Errorf("lookup session: %w", err)
+	}
+	if sess.RevokedAt != nil {
+		return invalidLogin()
+	}
+	if err := s.store.RevokeSession(ctx, sess.ID); err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	return s.audit(ctx, actorID, ActionSessionRevoked, "session", sess.ID.String(), map[string]any{
+		"via": "refresh_token",
+	})
 }
 
 // audit appends one audit entry attributed to actorID (the zero UUID

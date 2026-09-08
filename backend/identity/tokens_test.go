@@ -69,7 +69,7 @@ func TestIssueProducesValidatableAccessToken(t *testing.T) {
 	require.Len(t, raw, refreshTokenBytes)
 
 	// The session is persisted with the hash, never the token itself.
-	hash := RefreshTokenHash(resp.RefreshToken)
+	hash := issuer.RefreshTokenHash(resp.RefreshToken)
 	sess, err := store.GetSessionByRefreshHash(t.Context(), hash)
 	require.NoError(t, err)
 	require.Equal(t, sess.ID.String(), claims.SessionID)
@@ -129,7 +129,7 @@ func TestRefreshRejectsExpiredToken(t *testing.T) {
 
 	resp, err := issuer.Issue(t.Context(), store, user, "", "")
 	require.NoError(t, err)
-	hash := RefreshTokenHash(resp.RefreshToken)
+	hash := issuer.RefreshTokenHash(resp.RefreshToken)
 	sess, err := store.GetSessionByRefreshHash(t.Context(), hash)
 	require.NoError(t, err)
 	store.expireSession(sess.ID)
@@ -146,7 +146,7 @@ func TestRefreshRejectsRevokedAndUnknownTokens(t *testing.T) {
 
 	resp, err := issuer.Issue(t.Context(), store, user, "", "")
 	require.NoError(t, err)
-	hash := RefreshTokenHash(resp.RefreshToken)
+	hash := issuer.RefreshTokenHash(resp.RefreshToken)
 	sess, err := store.GetSessionByRefreshHash(t.Context(), hash)
 	require.NoError(t, err)
 
@@ -170,7 +170,7 @@ func TestRevokeIsIdempotentForKnownSessions(t *testing.T) {
 
 	resp, err := issuer.Issue(t.Context(), store, user, "", "")
 	require.NoError(t, err)
-	sess, err := store.GetSessionByRefreshHash(t.Context(), RefreshTokenHash(resp.RefreshToken))
+	sess, err := store.GetSessionByRefreshHash(t.Context(), issuer.RefreshTokenHash(resp.RefreshToken))
 	require.NoError(t, err)
 
 	require.NoError(t, issuer.Revoke(t.Context(), store, sess.ID))
@@ -178,10 +178,15 @@ func TestRevokeIsIdempotentForKnownSessions(t *testing.T) {
 	require.Error(t, issuer.Revoke(t.Context(), store, uuid.New()), "unknown sessions are not found")
 }
 
-func TestRefreshTokenHashIsDeterministic(t *testing.T) {
+func TestRefreshTokenHashIsKeyedAndDeterministic(t *testing.T) {
+	issuerA := NewIssuer("secret-a-motivra-identity", testIssuer, testAudience)
+	issuerB := NewIssuer("secret-b-motivra-identity", testIssuer, testAudience)
 	token := "some-opaque-refresh-token"
-	require.Equal(t, RefreshTokenHash(token), RefreshTokenHash(token))
-	require.NotEqual(t, RefreshTokenHash(token), RefreshTokenHash(token+"x"))
+
+	require.Equal(t, issuerA.RefreshTokenHash(token), issuerA.RefreshTokenHash(token))
+	require.NotEqual(t, issuerA.RefreshTokenHash(token), issuerA.RefreshTokenHash(token+"x"))
+	require.NotEqual(t, issuerA.RefreshTokenHash(token), issuerB.RefreshTokenHash(token),
+		"the digest is keyed with the issuer secret (ADR-0004)")
 }
 
 func TestHighestRolePrecedence(t *testing.T) {

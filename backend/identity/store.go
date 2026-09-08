@@ -31,12 +31,15 @@ type SessionStore interface {
 	// CreateSession persists a new refresh session.
 	CreateSession(ctx context.Context, s Session) error
 	// GetSessionByRefreshHash returns the session owning the given
-	// hex-encoded SHA-256 refresh-token digest.
+	// hex-encoded HMAC-SHA256 refresh-token digest.
 	GetSessionByRefreshHash(ctx context.Context, hash string) (Session, error)
 	// RevokeSession marks the session revoked (sets revoked_at).
 	RevokeSession(ctx context.Context, id uuid.UUID) error
 	// GetUser returns the user with roles loaded.
 	GetUser(ctx context.Context, id uuid.UUID) (User, error)
+	// ListUsers returns a newest-first page of users with roles loaded,
+	// limited to limit rows after skipping offset.
+	ListUsers(ctx context.Context, limit, offset int) ([]User, error)
 	// GetUserByEmail returns the user with roles loaded; matching is
 	// case-insensitive.
 	GetUserByEmail(ctx context.Context, email string) (User, error)
@@ -221,6 +224,74 @@ func rolesFromGrants(grants []RoleGrant) []Role {
 		roles = append(roles, g.Role)
 	}
 	return roles
+}
+
+// ListUsers returns a newest-first page of users with roles loaded, limited
+// to limit rows after skipping offset. Roles are fetched in one batched
+// query to avoid per-user round trips.
+func (s *PostgresStore) ListUsers(ctx context.Context, limit, offset int) ([]User, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, email, COALESCE(phone, '') AS phone, password_hash, full_name, status, created_at, updated_at
+                 FROM users ORDER BY created_at DESC, id LIMIT $1 OFFSET $2`, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	users := []User{}
+	for rows.Next() {
+		u, scanErr := scanUser(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	rows.Close()
+
+	if len(users) == 0 {
+		return users, nil
+	}
+	ids := make([]uuid.UUID, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.ID)
+	}
+	grantsByUser, err := s.batchRoleGrants(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range users {
+		users[i].Roles = rolesFromGrants(grantsByUser[users[i].ID])
+	}
+	return users, nil
+}
+
+// batchRoleGrants loads role grants for many users in one query, grouped by
+// user id.
+func (s *PostgresStore) batchRoleGrants(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID][]RoleGrant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT user_id, role, tenant_id FROM user_roles WHERE user_id = ANY($1) ORDER BY created_at, id`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list role grants: %w", err)
+	}
+	defer rows.Close()
+
+	grants := map[uuid.UUID][]RoleGrant{}
+	for rows.Next() {
+		var userID uuid.UUID
+		var role string
+		var tenant *uuid.UUID
+		if err := rows.Scan(&userID, &role, &tenant); err != nil {
+			return nil, fmt.Errorf("scan role grant: %w", err)
+		}
+		grants[userID] = append(grants[userID], RoleGrant{Role: Role(role), TenantID: tenant})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list role grants: %w", err)
+	}
+	return grants, nil
 }
 
 // scanUser hydrates a User from one row of the shared user SELECT.

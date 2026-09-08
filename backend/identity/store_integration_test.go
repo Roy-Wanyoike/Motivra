@@ -66,12 +66,27 @@ func TestPostgresStoreFullFlow(t *testing.T) {
 	_, err = svc.RefreshTokens(t.Context(), loggedIn.RefreshToken)
 	requireUnauthorized(t, err)
 
-	// Logout the live (rotated) session and verify the audit trail.
+	// Logout by refresh token (the public-endpoint path), then verify
+	// the revoked token can neither refresh nor log out again.
+	require.NoError(t, svc.LogoutByRefreshToken(t.Context(), rotated.RefreshToken, userID))
+	_, err = svc.RefreshTokens(t.Context(), rotated.RefreshToken)
+	requireUnauthorized(t, err)
+	err = svc.LogoutByRefreshToken(t.Context(), rotated.RefreshToken, userID)
+	requireUnauthorized(t, err)
+
+	// Session-id logout stays idempotent for the already-revoked row.
 	rotatedClaims, err := validator.Validate(rotated.AccessToken)
 	require.NoError(t, err)
 	sessionID, err := uuid.Parse(rotatedClaims.SessionID)
 	require.NoError(t, err)
 	require.NoError(t, svc.Logout(t.Context(), sessionID, userID))
+
+	// Admin listing returns the single account, hashes stripped.
+	users, err := svc.ListUsers(t.Context(), 10, 0)
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	require.Empty(t, users[0].PasswordHash)
+	require.Equal(t, []Role{RoleCustomer}, users[0].Roles)
 
 	profile, err := svc.Profile(t.Context(), userID)
 	require.NoError(t, err)

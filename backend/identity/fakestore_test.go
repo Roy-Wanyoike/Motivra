@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -169,6 +170,35 @@ func (f *fakeStore) InsertAudit(_ context.Context, entry AuditEntry) error {
 	}
 	f.audits = append(f.audits, entry)
 	return nil
+}
+
+// ListUsers returns a newest-first page of users with roles loaded.
+func (f *fakeStore) ListUsers(_ context.Context, limit, offset int) ([]User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	all := make([]User, 0, len(f.users))
+	for _, u := range f.users {
+		cp := u
+		cp.Roles = nil
+		for _, g := range f.grants[u.ID] {
+			cp.Roles = append(cp.Roles, g.Role)
+		}
+		all = append(all, cp)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].CreatedAt.After(all[j].CreatedAt)
+		}
+		return all[i].ID.String() < all[j].ID.String()
+	})
+	if offset > len(all) {
+		offset = len(all)
+	}
+	all = all[offset:]
+	if limit < len(all) {
+		all = all[:limit]
+	}
+	return all, nil
 }
 
 // setStatus mutates a stored user's status for scenario tests.
