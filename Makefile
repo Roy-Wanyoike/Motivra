@@ -48,3 +48,19 @@ tidy: ## Sync go.mod and go.sum after changing imports.
 
 help: ## Show available targets.
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
+
+# --- Deployment readiness (issues #25 + #31): Docker stack + demo seed ---
+
+.PHONY: docker-build stack-up stack-down seed
+
+docker-build: ## Build one service image (SVC=identity|vehicles|jobs|dispatch) via ./Dockerfile.
+	docker build --build-arg SERVICE=$(SVC) -t motivra-$(SVC):dev .
+
+stack-up: ## Start the full application stack (PostGIS/redis/nats + identity/vehicles/jobs/dispatch).
+	docker compose -f docker-compose.app.yml up -d
+
+stack-down: ## Stop the full application stack (data volumes persist).
+	docker compose -f docker-compose.app.yml down
+
+seed: ## Seed demo data with scripts/seed_demo.sh (arg: DB URL; default = app stack on :5433).
+	bash scripts/seed_demo.sh $(SEED_URL)

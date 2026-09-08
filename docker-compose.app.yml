@@ -1,0 +1,219 @@
+# Motivra full application stack (issues #25 + #31).
+#
+#   cp .env.example .env   # optional — compose reads .env automatically
+#   docker compose -f docker-compose.app.yml up -d
+#
+# Distinct from docker-compose.dev.yml (dev dependencies only, `make dev`):
+# this file runs the FOUR Go services themselves, built from ./Dockerfile.
+#
+# Data layer per ADR-0001/ADR-0003: PostgreSQL **with PostGIS** is the sole
+# source of truth (per-domain migration chains run at each service's boot
+# via platform.MigrateUp — there is no separate migrate step to run).
+# Redis and NATS (JetStream) are derivations/transport. Temporal is
+# intentionally NOT part of this stack yet — see "Temporal" note at the
+# bottom and the KNOWN LIMITATIONS section of docs/RUNBOOK.md.
+#
+# Host port plan (chosen to coexist with docker-compose.dev.yml):
+#   postgres 5433, redis 6380, nats 4223 (client) / 8223 (monitoring),
+#   identity 8081, vehicles 8082, jobs 8083, dispatch 8084.
+
+name: motivra-app
+
+services:
+  # --- Data & messaging infrastructure (ADR-0003) ---
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    # PostGIS is required by the architecture (dispatch service areas,
+    # technician location, distance scoring — ADR-0003 "PostGIS provides
+    # the geospatial substrate").
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-motivra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-motivra}
+      POSTGRES_DB: ${POSTGRES_DB:-motivra}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Mirrors dev compose; dev-only default credentials.
+      test: ["CMD-SHELL", "pg_isready -U motivra -d motivra"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  redis:
+    image: redis:7-alpine
+    # Cache / rate-limit / ephemeral coordination only — never a source of
+    # truth (ADR-0003 hard rule 1).
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  nats:
+    image: nats:2-alpine
+    # JetStream enabled (ADR-0002 event backbone); monitoring port exposes
+    # GET /healthz for the container healthcheck.
+    command: "-js -m 8222"
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8222/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  # --- Application services (each runs its own migration chain at boot) ---
+
+  identity:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: identity
+    image: motivra/identity:local
+    environment:
+      MOTIVRA_APP_NAME: identity
+      MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
+      MOTIVRA_PORT: "8080"
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_REDIS_URL: redis://redis:6379/0
+      MOTIVRA_NATS_URL: nats://nats:4222
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
+      MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
+      MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
+      MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  vehicles:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: vehicles
+    image: motivra/vehicles:local
+    environment:
+      MOTIVRA_APP_NAME: vehicles
+      MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
+      MOTIVRA_PORT: "8080"
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_REDIS_URL: redis://redis:6379/0
+      MOTIVRA_NATS_URL: nats://nats:4222
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
+      MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
+      MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
+      MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  jobs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: jobs
+    image: motivra/jobs:local
+    environment:
+      MOTIVRA_APP_NAME: jobs
+      MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
+      MOTIVRA_PORT: "8080"
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_REDIS_URL: redis://redis:6379/0
+      MOTIVRA_NATS_URL: nats://nats:4222
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
+      MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
+      MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
+      MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8083:8080"
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  dispatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: dispatch
+    image: motivra/dispatch:local
+    environment:
+      MOTIVRA_APP_NAME: dispatch
+      MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
+      MOTIVRA_PORT: "8080"
+      # Dispatch is stateless (no database client), but platform.Config.
+      # Validate() requires MOTIVRA_DATABASE_URL outside the test env —
+      # the value is present-but-unused for this service.
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_REDIS_URL: redis://redis:6379/0
+      MOTIVRA_NATS_URL: nats://nats:4222
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
+      MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
+      MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
+      MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    ports:
+      - "8084:8080"
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  # --- Temporal (OUT OF SCOPE for this stack, for now) ---
+  #
+  # Temporal (workflow engine, see README stack table + ADR-0001) needs its
+  # own database, auto-setup and UI — docker-compose.dev.yml already ships a
+  # working dev profile (`make dev-temporal`). Wiring Temporal into THIS
+  # application stack lands with the first real workflow consumer, together
+  # with MOTIVRA_TEMPORAL_ADDRESS provisioning for the services that need a
+  # client (platform only dials; domains own workflows — ADR-0001).
+  # Until then MOTIVRA_TEMPORAL_ADDRESS is intentionally left unset here.
+
+networks:
+  motivra:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  nats-data:
