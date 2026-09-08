@@ -33,7 +33,7 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 - Pre-purchase inspection flow (Motivra Inspect wedge)
 - **Exit criteria:** inspector completes an inspection offline; report verifies against evidence
 
-## Wave 4 — Mobile garage (BACKEND CORE MERGED — PRs #21, #20; client apps next)
+## Wave 4 — Mobile garage (BACKEND CORE MERGED — PRs #21, #20; web foundation merged — PR #35)
 
 - Jobs & service request engine (full state machine, extensive tests)
 - Dispatch engine with explainable scoring (fit, distance, equipment, inventory, performance)
@@ -78,3 +78,4 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 
 - GitOps deployment (Argo CD), canary + rollback drills, runbooks, incident process
 - **Exit criteria:** the first real customer job completes the full loop in production — request, dispatch, repair, approval, payment, recorded lifecycle
+- **Status (window 2):** deployment baseline landed early — service Dockerfile, full compose stack (PostGIS/Redis/NATS), `.env.example`, runbook, idempotent demo seed (PR #34); release-readiness QA report with honest verdict and gate list (PR #37); secrets/dependency automation enabled. GitOps, canary, and SLO enforcement remain open.

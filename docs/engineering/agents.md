@@ -10,20 +10,20 @@ Each agent claims an issue by posting a claim comment on it (agent name, branch,
 
 | Role | Ownership zone | Primary deliverables | Status |
 |---|---|---|---|
-| A01 Principal Architect | `docs/adr/`, `docs/engineering/`, `docs/ARCHITECTURE.md` | Foundational ADRs (0001–0005), agent registry, architecture overview maintenance, cross-context boundary rulings | PLANNED |
-| A02 Product Manager | `docs/ROADMAP.md`, `docs/IDEAS.md`, issue taxonomy | Wave sequencing, issue definitions, prioritization, definition of done, metric targets | PLANNED |
-| A03 Product Designer | `/apps` shared design system, UX specs in `docs/design/` | Motivra design system, product flows, accessibility standards, UI review bar | PLANNED |
-| A04 Platform Foundation | `/backend/platform` | Config, HTTP server construct, middleware, pgx/sqlc data layer, Redis/NATS/Temporal wiring, health endpoints, service template | PLANNED |
-| A05 Identity & Security | `/backend/identity` | AuthN (JWT + refresh sessions), RBAC matrix, tenant isolation, device management, audit foundations | PLANNED |
-| A06 Vehicle Identity | `/backend/vehicles` (registry, VIN) | Canonical vehicle identity, VIN resolution, component registry | PLANNED |
-| A07 Vehicle Registry & History | `/backend/vehicles` (history) | Append-only service history, mileage records, corrections-as-new-records semantics | PLANNED |
-| A08 Vehicle Passport | `/backend/vehicles` (passport read model) | Passport assembly from history, provenance display, verified report surfacing | PLANNED |
+| A01 Principal Architect | `docs/adr/`, `docs/engineering/`, `docs/ARCHITECTURE.md` | Foundational ADRs (0001–0005), agent registry, architecture overview maintenance, cross-context boundary rulings | MERGED — PR #8 |
+| A02 Product Manager | `docs/ROADMAP.md`, `docs/IDEAS.md`, issue taxonomy | Wave sequencing, issue definitions, prioritization, definition of done, metric targets | MERGED — PR #1; issues #2–#7, #24–#31, #38 |
+| A03 Product Designer | `/apps` shared design system, UX specs in `docs/design/` | Motivra design system, product flows, accessibility standards, UI review bar | FOUNDATION MERGED — PR #35 (design tokens + a11y bar in apps/customer); design-system docs pending |
+| A04 Platform Foundation | `/backend/platform` | Config, HTTP server construct, middleware, pgx/sqlc data layer, Redis/NATS/Temporal wiring, health endpoints, service template | MERGED — PRs #14, #15 |
+| A05 Identity & Security | `/backend/identity` | AuthN (JWT + refresh sessions), RBAC matrix, tenant isolation, device management, audit foundations | MERGED — PR #16 |
+| A06 Vehicle Identity | `/backend/vehicles` (registry, VIN) | Canonical vehicle identity, VIN resolution, component registry | MERGED — PR #17 |
+| A07 Vehicle Registry & History | `/backend/vehicles` (history) | Append-only service history, mileage records, corrections-as-new-records semantics | MERGED — PR #17 |
+| A08 Vehicle Passport | `/backend/vehicles` (passport read model) | Passport assembly from history, provenance display, verified report surfacing | MERGED — PR #17 |
 | A09 Inspection Platform | `/backend/inspections` (templates, findings) | Dynamic inspection templates, severity model (GREEN/AMBER/RED), inspection state machine | PLANNED |
 | A10 Evidence Platform | `/backend/inspections` (evidence, media) | Evidence capture, provenance records, S3 media handling, verified report generation | PLANNED |
-| A11 Service Platform | `/backend/jobs` | Service requests, job state machine, assignments, escalation triggers | PLANNED |
-| A12 Dispatch | `/backend/dispatch` | Explainable dispatch scoring (fit, distance, equipment, performance), availability, service areas | PLANNED |
+| A11 Service Platform | `/backend/jobs` | Service requests, job state machine, assignments, escalation triggers | MERGED — PR #21 |
+| A12 Dispatch | `/backend/dispatch` | Explainable dispatch scoring (fit, distance, equipment, performance), availability, service areas | MERGED — PR #20 |
 | A13 Technician | `/backend/dispatch` (technician profiles, quality), technician domain events | Technician verification, skills, quality scoring, earnings surface | PLANNED |
-| A14 Mobile/Offline | `/apps/technician` | Offline-first field app: local DB, outbox, sync queue, conflict resolution, resumable uploads | PLANNED |
+| A14 Mobile/Offline | `/apps/technician` | Offline-first field app: local DB, outbox, sync queue, conflict resolution, resumable uploads | TRACKED — issue #29 |
 | A15 Garage | `/backend/garages` | Garage onboarding, verification, capacity, appointments, mobile-to-garage escalation | PLANNED |
 | A16 Parts | `/backend/parts` | Parts catalog, OEM/aftermarket compatibility, inventory, reservations, supplier orders | PLANNED |
 | A17 Payments | `/backend/payments` | Provider abstraction, M-Pesa first, integer-minor-unit ledger, webhooks, reconciliation, refunds | PLANNED |
@@ -33,13 +33,13 @@ Each agent claims an issue by posting a claim comment on it (agent name, branch,
 | A21 AI/ML | `/backend/ai` | AI triage, technician copilot, predictive maintenance — advisory outputs only (prediction, confidence, source, verification state) | PLANNED |
 | A22 Data Engineering | `/backend/analytics`, ClickHouse projections | Event-consumption pipelines, analytics projections, unit-economics and investor metrics layers | PLANNED |
 | A23 Integrations | `/contracts` integrations, country connectors | Payment/maps/SMS/WhatsApp provider adapters, country-connector layer, designed failure paths | PLANNED |
-| A24 Web Platform | `/apps/customer`, shared web packages | Motivra Drive (Next.js), request → live status → approval → history flows, shared UI implementation | PLANNED |
+| A24 Web Platform | `/apps/customer`, shared web packages | Motivra Drive (Next.js), request → live status → approval → history flows, shared UI implementation | FOUNDATION MERGED — PR #35 |
 | A25 API/Developer Platform | `/contracts`, developer platform service | Public API v1, API keys, OAuth apps, webhooks, sandbox, usage metering, SDKs | PLANNED |
-| A26 Observability/SRE | `/observability`, deployment observability stack | Dashboards-as-code, alert rules, SLO definitions, runbooks, incident process | PLANNED |
-| A27 Security Engineering | Cross-cutting review; security middleware in `/backend/platform` | Threat model, SAST/dependency/container scanning, secrets discipline, security review sign-off | PLANNED |
-| A28 QA/Test Engineering | Test suites across `/backend`, `/apps`; E2E harness | Test strategy, unit/integration/contract/E2E coverage, offline-sync tests, failure-path tests | PLANNED |
-| A29 DevEx | `scripts/`, `Makefile`, Docker Compose, service templates | Local dev environment (`make dev`), CI ergonomics, developer onboarding path | PLANNED |
-| A30 Release Engineering | `/infrastructure`, `.github/workflows` | GitOps (Argo CD), Helm charts, canary + rollback automation, release pipeline | PLANNED |
+| A26 Observability/SRE | `/observability`, deployment observability stack | Dashboards-as-code, alert rules, SLO definitions, runbooks, incident process | FOUNDATION MERGED — PR #34 (runbook, compose, Dockerfile); dashboards/SLOs pending |
+| A27 Security Engineering | Cross-cutting review; security middleware in `/backend/platform` | Threat model, SAST/dependency/container scanning, secrets discipline, security review sign-off | FOUNDATION MERGED — PR #33 (SECURITY.md, CODEOWNERS), PR #37 (security review) |
+| A28 QA/Test Engineering | Test suites across `/backend`, `/apps`; E2E harness | Test strategy, unit/integration/contract/E2E coverage, offline-sync tests, failure-path tests | FOUNDATION MERGED — PR #37 (QA report, 153 tests verified); E2E harness pending |
+| A29 DevEx | `scripts/`, `Makefile`, Docker Compose, service templates | Local dev environment (`make dev`), CI ergonomics, developer onboarding path | FOUNDATION MERGED — PRs #9 (Makefile), #34 (stack, seed) |
+| A30 Release Engineering | `/infrastructure`, `.github/workflows` | GitOps (Argo CD), Helm charts, canary + rollback automation, release pipeline | FOUNDATION MERGED — PR #34 (Docker, compose); Helm/Argo pending |
 
 Zones marked "planned context" follow the bounded-context recipe in ADR-0001 and are created by their owning agent with the context's first PR. Where two roles share a directory (e.g. A06/A07/A08 in `/backend/vehicles`), the sub-zone in parentheses is the split — they coordinate through dependency requests, not parallel edits to the same files.
 
@@ -58,6 +58,10 @@ Zones marked "planned context" follow the bounded-context recipe in ADR-0001 and
 ### Integration Window 1 (completed)
 
 After the Wave 4 backend-core merges, feature work paused for validation per the build directive: exhaustive state-machine matrices green, migration validator green across 10 domains, race-enabled test suite green locally, ownership-zone audits clean on every merged PR. Known deferred work is tracked in PR review notes (tenant scoping on reads, NATS publisher wiring, Postgres-gated integration tests in CI).
+
+### Integration Window 2 (completed)
+
+Full-repo audit and readiness pass (backend → frontend → ops → docs). Merged: Apache-2.0 licensing with DCO intake (PR #32, ADR-0006); master build directive preserved in-repo with provenance audit trail (PR #33); deployment baseline — Dockerfile, full compose stack, env template, runbook, idempotent demo seed (PR #34); Motivra Drive web foundation — landing, auth, dashboard shell, typed API client scaffold, 12 component tests (PR #35); dependabot security bump verified locally then merged (PR #36); release-readiness QA report from fresh-clone verification — 153 tests green, contracts 1:1 with code, zero secret-scan hits (PR #37). Security automation: Dependabot alerts + automated security fixes + push protection enabled; secret scanning needs a one-time repo-settings toggle (API 404 on free plan). Newly tracked: vehicles listing endpoint gap (#38); open deferrals: hardening umbrella (#28), mobile foundation (#29), CI billing lock (#10, owner action). Cumulative: 16 merged PRs.
 
 ## Status protocol
 
