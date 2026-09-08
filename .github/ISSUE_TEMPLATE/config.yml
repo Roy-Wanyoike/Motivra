@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ideas board
+    url: https://github.com/Roy-Wanyoike/Motivra/blob/main/docs/IDEAS.md
+    about: Product and platform ideas being considered — comment there before opening a feature issue.

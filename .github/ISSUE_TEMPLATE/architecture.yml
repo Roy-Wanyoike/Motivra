@@ -1,0 +1,32 @@
+name: Architecture / ADR
+description: A structural decision, boundary change, or Architecture Decision Record
+labels: ["type/architecture"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Forces at play — scale, failure modes, economics, team boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Proposed decision
+      description: The decision and its consequences. Name the ADR number (ADR-0001, ADR-0002, ...).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else was on the table and why it lost. "Do nothing" is an alternative too.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact surfaces
+      description: Bounded contexts, contracts, events, tables, teams affected.
+    validations:
+      required: true

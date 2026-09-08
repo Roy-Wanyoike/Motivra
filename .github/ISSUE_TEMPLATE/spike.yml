@@ -1,0 +1,25 @@
+name: Spike / Investigation
+description: Time-boxed research that produces a written answer, a decision, and follow-up issues
+labels: ["type/spike"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question to answer
+      description: One sharp question. If it needs three paragraphs, split it.
+    validations:
+      required: true
+  - type: input
+    id: timebox
+    attributes:
+      label: Time box
+      description: e.g. 2 days. Spikes that exceed their time box get renegotiated, not extended silently.
+    validations:
+      required: true
+  - type: textarea
+    id: deliverable
+    attributes:
+      label: Deliverable
+      description: Where the answer is written (ADR, docs/, benchmark results) and what issues it spawns.
+    validations:
+      required: true
