@@ -1,0 +1,35 @@
+{
+  "name": "motivra-drive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Motivra Drive — customer web app (Next.js). Service requests, Vehicle Passport, verified history.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "next": "15.5.25",
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "3.3.1",
+    "@tailwindcss/postcss": "4.1.18",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "20.19.33",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "4.7.0",
+    "eslint": "9.39.2",
+    "eslint-config-next": "15.5.25",
+    "jsdom": "26.1.0",
+    "tailwindcss": "4.1.18",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}
