@@ -1,0 +1,56 @@
+name: Feature
+description: A customer-visible or platform-visible capability (produces a PR before close)
+labels: ["type/feature"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What must be true for a user or the platform when this is done? No TODO implementations, no mocked production flows.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checklist form. Include tests, contracts, observability and rollback expectations.
+    validations:
+      required: true
+  - type: dropdown
+    id: zone
+    attributes:
+      label: Ownership zone
+      options:
+        - backend/platform
+        - backend/identity
+        - backend/vehicles
+        - backend/jobs
+        - backend/dispatch
+        - backend/inspections
+        - backend/estimates
+        - backend/payments
+        - backend/parts
+        - backend/garages
+        - backend/notifications
+        - backend/ai
+        - apps/customer
+        - apps/technician
+        - apps/admin
+        - apps/fleet
+        - infrastructure
+        - contracts
+        - docs
+    validations:
+      required: true
+  - type: textarea
+    id: deps
+    attributes:
+      label: Dependencies
+      description: Contracts or domains this depends on. Cross-zone changes need a dependency request.
+  - type: dropdown
+    id: wave
+    attributes:
+      label: Wave
+      options: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+    validations:
+      required: true
