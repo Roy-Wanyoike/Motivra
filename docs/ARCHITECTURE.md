@@ -90,3 +90,15 @@ OpenTelemetry everywhere; Prometheus/Grafana/Loki/Tempo. Every service exposes h
 ## 9. Migrations
 
 Migration chains are partitioned per domain (`/backend/migrations/<domain>`). Backward-compatible by default, tested, documented, with rollback strategies. Destructive changes follow expand → migrate → contract.
+
+## ADR index
+
+Architecture decision records are the normative layer above this document: when an ADR and this overview disagree, the ADR wins.
+
+| ADR | Title | Status |
+|---|---|---|
+| [ADR-0001](adr/0001-bounded-contexts-and-monorepo-layout.md) | Bounded Contexts and Monorepo Layout | Accepted |
+| [ADR-0002](adr/0002-event-schema-and-jetstream-topics.md) | Event Schema and NATS JetStream Topic Design | Accepted |
+| [ADR-0003](adr/0003-data-ownership-and-migrations.md) | Data Ownership and Per-Domain Migration Strategy | Accepted |
+| [ADR-0004](adr/0004-security-baseline.md) | Security Baseline — AuthN, AuthZ, Tenant Isolation, Money Integrity | Accepted |
+| [ADR-0005](adr/0005-observability-and-slos.md) | Observability Baseline and Initial SLOs | Accepted |
