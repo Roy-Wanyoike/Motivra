@@ -1,0 +1,24 @@
+{
+  "name": "@motivra/technician",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Motivra Tech — offline-first technician field app (Expo). Foundation: outbox, sync skeleton, job screens, state guards (issue #29).",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "expo": "57.0.21",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
