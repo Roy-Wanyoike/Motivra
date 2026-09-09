@@ -46,7 +46,7 @@ Copy `.env.example` to `.env.local` for local overrides. No secrets belong in
 | `/` | Landing page with the real Motivra narrative (problem, nine product surfaces, MVP loop, audiences, honest status). |
 | `/login` | Sign-in form shaped to `POST /v1/auth/login` (`LoginRequest { email, password }`), client-side validation, explicit "API integration pending" state on valid submit. No network calls. |
 | `/dashboard` | App shell (sidebar: Dashboard / Vehicles / Jobs / Passport / Settings + topbar) with empty-state cards naming the contract endpoint each area will consume. |
-| `/dashboard/vehicles` | Vehicle table skeleton (registry columns) + link to the passport timeline placeholder. |
+| `/dashboard/vehicles` | Vehicle registry table wired to `GET /v1/vehicles` at **runtime** — loading, error (with retry), empty and data states, plus cursor-aware "Load more". Rows deep-link to the passport route. |
 | `/dashboard/vehicles/[vehicleId]` | Per-vehicle passport timeline placeholder component (`sample` route available). |
 
 ## API client (`src/lib/api`)
@@ -57,11 +57,17 @@ Types in `src/lib/api/types.ts` are **hand-derived** — field for field — fro
 - [`contracts/vehicles/openapi.yaml`](../../contracts/vehicles/openapi.yaml) — registry, passport, history
 
 Endpoint functions (`login`, `register`, `refresh`, `logout`, `getProfile`,
-`registerVehicle`, `getVehicle`, `getVehiclePassport`, `listVehicleHistory`,
-`recordVehicleMileage`) call those paths verbatim. Endpoint maps
-(`IDENTITY_ENDPOINTS`, `VEHICLE_ENDPOINTS`) double as UI copy so the contract
-path is visible in the interface. When a contract changes, update the types in
-the same PR.
+`listVehicles`, `registerVehicle`, `getVehicle`, `getVehiclePassport`,
+`listVehicleHistory`, `recordVehicleMileage`) call those paths verbatim.
+Endpoint maps (`IDENTITY_ENDPOINTS`, `VEHICLE_ENDPOINTS`) double as UI copy so
+the contract path is visible in the interface. When a contract changes, update
+the types in the same PR.
+
+`listVehicles` walks the keyset: pass one page's `next_cursor` back as
+`cursor`. Note that `src/lib/api/auth-token.ts` is the **interim** token
+source for runtime calls: it reads `localStorage["motivra.access_token"]`
+until the identity wiring lands. With no token present the request still goes
+out and the API's 401 surfaces in the UI's error state — never a fake success.
 
 ## Real vs stubbed (honesty table)
 
@@ -74,10 +80,10 @@ production flows) applies to this app.
 | Design system, a11y foundations | **Real** (landmarks, labeled controls, focus-visible, reduced-motion, contrast) | — |
 | Login form + client-side validation | **Real UI** — submit shows explicit pending state | `POST /v1/auth/login` — integration pending |
 | Dashboard shell & navigation | **Real UI** | — |
-| Dashboard cards | **Real UI**, empty-state only | `GET /v1/jobs`, `GET /v1/vehicles/{vehicleID}/passport`, `POST /v1/dispatch/score`, `GET /v1/users/me`, plus the planned `GET /v1/vehicles` listing (contracts/vehicles today defines `POST /v1/vehicles` + per-vehicle reads) — pending |
-| Vehicle table | **Skeleton** (headers + honest empty state) | vehicles API — pending (listing endpoint planned) |
+| Dashboard cards | **Real UI**, empty-state only | `GET /v1/jobs`, `GET /v1/vehicles/{vehicleID}/passport`, `POST /v1/dispatch/score`, `GET /v1/users/me` — pending. (The Vehicles card is wired: see the next row.) |
+| Vehicle table | **Contract-wired** — `GET /v1/vehicles` called at runtime from the browser (loading / error+retry / empty states, keyset "Load more"). Needs the API reachable **and** a Bearer token; without a token the API's 401 renders as the error state. Still **no data at build time** — the production build performs no network calls. Interim token source: `localStorage["motivra.access_token"]` (see `src/lib/api/auth-token.ts`) until identity wiring lands. | `GET /v1/vehicles` (limit + cursor keyset) |
 | Passport timeline | **Placeholder component** (event types per contract) | `GET /v1/vehicles/{vehicleID}/passport`, `GET /v1/vehicles/{vehicleID}/history` — pending |
-| Typed API client | **Scaffold** — complete, typed, unit of work for integration; unused at runtime today | all of the above |
+| Typed API client | **Real** — `login`…`recordVehicleMileage` incl. `listVehicles`; the vehicle list uses it at runtime, the remaining surfaces are wired but not yet called by any page | all of the above |
 | Jobs / Passport / Settings pages | **Stubbed** — disabled nav entries with "soon" badge, no fake screens | — |
 
 ## Accessibility (issue #24 acceptance)
@@ -98,7 +104,11 @@ npm test                # vitest run (jsdom)
 Coverage today: landing renders hero + narrative sections + repo link +
 product table; dashboard shell renders nav, honest badges and main landmark;
 login form renders labeled fields, validates and shows the pending state
-without network calls (`fetch` is asserted to never be called).
+without network calls (`fetch` is asserted to never be called); vehicle list
+mocks the fetch layer and covers (a) rows + passport deep-links from a mocked
+`VehicleList` response, (b) the empty state, (c) the error state with a working
+retry (plus the 401 hint), and (d) "Load more" appending page two via
+`next_cursor`.
 
 ## Ownership
 

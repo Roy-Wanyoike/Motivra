@@ -12,7 +12,7 @@ const CARDS = [
       "Your registered vehicles from the Vehicle Registry — one vehicle, one identity. Registering a vehicle uses POST /v1/vehicles with a VIN (ISO 3779, verified server-side), make, model and year of manufacture.",
     method: "GET",
     endpoint: "/v1/vehicles",
-    note: "Listing endpoint planned — contracts/vehicles today defines POST /v1/vehicles plus per-vehicle GET, passport, history and mileage.",
+    note: "Now wired — the Vehicles table fetches this endpoint at runtime (keyset pagination). Passport, history and mileage reads are next.",
   },
   {
     title: "Jobs",
