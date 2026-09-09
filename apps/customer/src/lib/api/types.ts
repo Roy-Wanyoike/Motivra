@@ -105,6 +105,29 @@ export interface Vehicle {
   updated_at: string;
 }
 
+/**
+ * contracts/vehicles/openapi.yaml — listVehicles query parameters.
+ * Keyset pagination: pass one page's `next_cursor` back as `cursor` to fetch
+ * the next. The scope itself is derived from the JWT claims server-side —
+ * never a query parameter.
+ */
+export interface ListVehiclesParams {
+  /** Page size (1–100). Contract default 50; values above 100 are capped server-side. */
+  limit?: number;
+  /** Opaque keyset cursor taken from a previous response's `next_cursor`. */
+  cursor?: string;
+}
+
+/**
+ * contracts/vehicles/openapi.yaml — VehicleList.
+ * One page of the caller's vehicle list, newest first (`created_at DESC, id DESC`).
+ */
+export interface VehicleList {
+  vehicles: Vehicle[];
+  /** Opaque keyset cursor for the next page; absent when this page is the last one. */
+  next_cursor?: string;
+}
+
 /** contracts/vehicles/openapi.yaml — CreateVehicleRequest (VIN is normalized server-side). */
 export interface CreateVehicleRequest {
   vin: string;
