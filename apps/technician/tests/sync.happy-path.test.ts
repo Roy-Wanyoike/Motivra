@@ -63,7 +63,7 @@ describe('sync reconciler — enqueue → drain happy path', () => {
     expect(summary.push.succeeded).toBe(1);
     expect(summary.pulled).toBe(2);
     expect(summary.applied).toBe(2);
-    expect(summary.skippedForConflict).toBe(0);
+    expect(summary.conflicts).toBe(0);
     expect(summary.cursor).toBeNull();
     expect((await outbox.storage.get(operation.id))?.state).toBe('DONE');
 
@@ -96,7 +96,7 @@ describe('sync reconciler — enqueue → drain happy path', () => {
     expect(second.pulled).toBe(0);
   });
 
-  it('conflict placeholder: a job with live local intent is NOT clobbered by pull', async () => {
+  it('a pull with no registered intent adopts the server snapshot (server-authoritative)', async () => {
     const outbox = new Outbox({
       storage: new InMemoryOutboxStorage(),
       dispatcher: { dispatch: async () => ({ kind: 'accepted' }) },
@@ -105,7 +105,8 @@ describe('sync reconciler — enqueue → drain happy path', () => {
     });
     const store = new JobStore();
     store.seed([{ ...JOB_A, status: 'ASSIGNED' }]);
-    // Local intent pending for JOB_A (e.g. op queued, not yet drained).
+    // Badge-only pending state (no live intent registered via setPendingIntent):
+    // the merge protocol keys on the intent record, not the badge.
     store.markPending(JOB_A.id, true);
 
     const serverSays: JobSnapshot = { ...JOB_A, status: 'CANCELLED' }; // server moved on
@@ -113,10 +114,11 @@ describe('sync reconciler — enqueue → drain happy path', () => {
     const reconciler = new SyncReconciler({ outbox, pull, store, clock: () => 0 });
 
     const summary = await reconciler.sync();
-    expect(summary.skippedForConflict).toBe(1);
     expect(summary.pulled).toBe(1);
-    // Optimistic local state preserved — no last-write-wins.
-    expect(store.get(JOB_A.id)?.status).toBe('ASSIGNED');
+    expect(summary.applied).toBe(1);
+    expect(summary.conflicts).toBe(0);
+    // Server is authoritative when no client intent is on record.
+    expect(store.get(JOB_A.id)?.status).toBe('CANCELLED');
   });
 
   it('JobStore implements the JobLocalStore contract the reconciler needs', () => {

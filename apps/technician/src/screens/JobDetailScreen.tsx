@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useReducer, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { guard, legalTargets } from '../domain/job-state';
@@ -15,15 +15,22 @@ import { JobStore } from '../state/job-store';
  *   1. `guard(next, current)` — pure client-side mirror of the server state
  *      machine; illegal moves never leave the device.
  *   2. enqueue `job.transition` into the outbox with a fresh idempotency key
- *      (payload mirrors POST /v1/jobs/{jobID}/transitions: { to, reason }).
- *   3. optimistic local status update; the server corrects us on next pull
- *      if it rejects (its 409 is authoritative — no last-write-wins).
+ *      (payload mirrors POST /v1/jobs/{jobID}/transitions: { to, reason },
+ *      plus `job_id` metadata so the reconciler can re-base the intent if
+ *      the server rejects it).
+ *   3. register the live intent + optimistic local status; the three-way
+ *      merge decides what the display shows on the next pull, and a server
+ *      409 becomes a persistent, visible rejected-intent record (issue #55) —
+ *      never a silent overwrite.
  */
 export function JobDetailScreen({ jobId, jobStore }: { jobId: string; jobStore: JobStore }) {
   const job = jobStore.get(jobId);
   const { back, canGoBack } = useNavigation();
   const { outbox, syncNow } = useSync();
   const [error, setError] = useState<string | null>(null);
+  // The store is observable, but this screen reads snapshots directly;
+  // conflict acknowledgment mutates the store, so force one re-render.
+  const [, forceRender] = useReducer((n: number) => n + 1, 0);
 
   if (!job) {
     return (
@@ -47,7 +54,13 @@ export function JobDetailScreen({ jobId, jobStore }: { jobId: string; jobStore: 
     void (async () => {
       const { operation } = await outbox.enqueue({
         type: 'job.transition',
-        payload: { to, reason: `proposed on device from ${current}` },
+        payload: { job_id: job.id, to, reason: `proposed on device from ${current}` },
+      });
+      jobStore.setPendingIntent(job.id, {
+        op_id: operation.id,
+        idempotency_key: operation.idempotency_key,
+        to_status: to,
+        enqueued_at: operation.created_at,
       });
       jobStore.markPending(job.id, true);
       jobStore.appendPendingTransition(job.id, {
@@ -60,7 +73,6 @@ export function JobDetailScreen({ jobId, jobStore }: { jobId: string; jobStore: 
         created_at: new Date().toISOString(),
       });
       jobStore.optimisticStatus(job.id, to);
-      jobStore.markPending(job.id, false);
       await syncNow();
     })();
   };
@@ -76,6 +88,29 @@ export function JobDetailScreen({ jobId, jobStore }: { jobId: string; jobStore: 
       <Text style={styles.meta}>
         {job.id} · vehicle {job.vehicle_id ?? '—'}
       </Text>
+      {job.local_conflict ? (
+        <View style={styles.conflictBanner} testID="conflict-banner">
+          <Text style={styles.conflictTitle}>
+            Server rejected a proposed move
+          </Text>
+          <Text style={styles.conflictText}>
+            Proposed {job.local_conflict.proposed_status} · server verdict: {job.local_conflict.reason}
+          </Text>
+          <Text style={styles.conflictText}>
+            At {job.local_conflict.at} · key {job.local_conflict.idempotency_key.slice(0, 8)}…
+          </Text>
+          <Pressable
+            testID="conflict-ack"
+            style={styles.conflictAck}
+            onPress={() => {
+              jobStore.clearConflict(job.id);
+              forceRender();
+            }}
+          >
+            <Text style={styles.conflictAckText}>Acknowledge</Text>
+          </Pressable>
+        </View>
+      ) : null}
       <View style={styles.statusHeader}>
         <Text style={styles.statusLabel}>Status</Text>
         <View style={styles.statusPill}>
@@ -137,4 +172,24 @@ const styles = StyleSheet.create({
   button: { backgroundColor: '#1a7f37', borderRadius: 8, paddingHorizontal: 14, paddingVertical: 10 },
   buttonText: { color: '#fff', fontWeight: '700', fontSize: 13 },
   error: { color: '#c62828', marginTop: 12, fontSize: 13 },
+  conflictBanner: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#c62828',
+    backgroundColor: '#fdecea',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 10,
+  },
+  conflictTitle: { color: '#c62828', fontWeight: '700', fontSize: 13 },
+  conflictText: { color: '#8b1a12', fontSize: 12, marginTop: 2 },
+  conflictAck: {
+    alignSelf: 'flex-start',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#c62828',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginTop: 6,
+  },
+  conflictAckText: { color: '#c62828', fontWeight: '600', fontSize: 12 },
 });

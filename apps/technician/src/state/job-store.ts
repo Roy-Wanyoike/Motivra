@@ -1,9 +1,22 @@
-import type { JobLocalStore, JobSnapshot, JobTransitionRow } from '../sync/api';
+import type {
+  JobLocalStore,
+  JobSnapshot,
+  JobTransitionRow,
+  LocalConflict,
+  PendingIntent,
+  RejectedIntent,
+} from '../sync/api';
 
 /**
  * In-memory local read model for jobs. Implements the reconciler's
  * `JobLocalStore` interface and adds a tiny subscription API for React
  * (`useSyncExternalStore`).
+ *
+ * Three maps back the conflict protocol (issue #55):
+ *  - `serverBase` — last PURE server snapshot per job (the merge base);
+ *  - `intents` / `intentsByOp` — live client intents (forward + reverse index);
+ *  - `rejected` — persistent server-rejected intents, deduped per op id,
+ *    kept visible on the display until acknowledged.
  *
  * Production persistence (SQLite via expo-sqlite / AsyncStorage mirror) is a
  * documented follow-up — this store resets on app restart, which is exactly
@@ -11,7 +24,11 @@ import type { JobLocalStore, JobSnapshot, JobTransitionRow } from '../sync/api';
  */
 export class JobStore implements JobLocalStore {
   private jobs = new Map<string, JobSnapshot>();
+  private serverBase = new Map<string, JobSnapshot>();
   private pendingJobIds = new Set<string>();
+  private intents = new Map<string, PendingIntent>();
+  private intentsByOp = new Map<string, string>();
+  private rejected = new Map<string, RejectedIntent>();
   private listeners = new Set<() => void>();
   private snapshotCache: JobSnapshot[] = [];
 
@@ -22,14 +39,79 @@ export class JobStore implements JobLocalStore {
     this.emit();
   }
 
-  /** Called by the UI after an op for the job reaches DONE/FAILED. */
+  /** Jobs currently known locally that have unfinished (PENDING/IN_FLIGHT) outbox ops. */
   hasPendingOpsForJob(jobId: string): boolean {
     return this.pendingJobIds.has(jobId);
   }
 
-  applyServerSnapshot(job: JobSnapshot): void {
-    this.jobs.set(job.id, job);
+  pendingIntentForJob(jobId: string): PendingIntent | null {
+    return this.intents.get(jobId) ?? null;
+  }
+
+  setPendingIntent(jobId: string, intent: PendingIntent | null): void {
+    const previous = this.intents.get(jobId);
+    if (previous) this.intentsByOp.delete(previous.op_id);
+    if (!intent) {
+      this.intents.delete(jobId);
+      this.dropOverlay(jobId);
+    } else {
+      this.intents.set(jobId, intent);
+      this.intentsByOp.set(intent.op_id, jobId);
+      // Keep the display immediately consistent with the live intent.
+      this.applyOverlay(jobId, intent);
+    }
     this.emit();
+  }
+
+  jobIdForOp(opId: string): string | null {
+    return this.intentsByOp.get(opId) ?? null;
+  }
+
+  serverBaseForJob(jobId: string): JobSnapshot | null {
+    return this.serverBase.get(jobId) ?? null;
+  }
+
+  /** Upsert a PURE server snapshot: replaces the base and the display. */
+  applyServerSnapshot(job: JobSnapshot): void {
+    // An unacknowledged conflict surface survives server updates — the
+    // technician must acknowledge it; a pull never silently hides a 409.
+    const existingConflict = this.jobs.get(job.id)?.local_conflict ?? null;
+    this.serverBase.set(job.id, { ...job, pending_intent: null, local_conflict: null });
+    this.jobs.set(job.id, { ...job, pending_intent: null, local_conflict: existingConflict });
+    this.emit();
+  }
+
+  /** Adopt a merged display snapshot (server fields + live intent overlay). */
+  applyMergedSnapshot(server: JobSnapshot, display: JobSnapshot): void {
+    this.serverBase.set(server.id, { ...server, pending_intent: null });
+    this.jobs.set(server.id, display);
+    this.emit();
+  }
+
+  applyLocalConflict(jobId: string, conflict: LocalConflict): void {
+    const current = this.jobs.get(jobId);
+    if (!current) return;
+    this.jobs.set(jobId, { ...current, local_conflict: conflict });
+    this.emit();
+  }
+
+  clearConflict(jobId: string): void {
+    const current = this.jobs.get(jobId);
+    if (!current || !current.local_conflict) return;
+    const { local_conflict: _dropped, ...rest } = current;
+    this.jobs.set(jobId, { ...rest, local_conflict: null });
+    this.emit();
+  }
+
+  recordRejectedIntent(jobId: string, entry: RejectedIntent): void {
+    // Dedupe per op id — the rebaser re-scans FAILED ops on every sync.
+    if (this.rejected.has(entry.op_id)) return;
+    this.rejected.set(entry.op_id, entry);
+    this.applyLocalConflict(jobId, entry);
+  }
+
+  rejectedIntents(): RejectedIntent[] {
+    return [...this.rejected.values()];
   }
 
   all(): JobSnapshot[] {
@@ -60,7 +142,10 @@ export class JobStore implements JobLocalStore {
   }
 
   seed(jobs: JobSnapshot[]): void {
-    for (const job of jobs) this.jobs.set(job.id, job);
+    for (const job of jobs) {
+      this.jobs.set(job.id, job);
+      this.serverBase.set(job.id, { ...job, pending_intent: null });
+    }
     this.emit();
   }
 
@@ -73,6 +158,23 @@ export class JobStore implements JobLocalStore {
     this.snapshotCache = [...this.jobs.values()];
     return this.snapshotCache;
   };
+
+  /** Re-apply (or first-apply) the optimistic overlay for a live intent. */
+  private applyOverlay(jobId: string, intent: PendingIntent): void {
+    const base = this.serverBase.get(jobId);
+    if (!base) return; // nothing pulled yet — display stays as-is until first pull
+    this.jobs.set(jobId, { ...base, status: intent.to_status, pending_intent: intent });
+  }
+
+  /** Drop the optimistic overlay; display reverts to the pure server snapshot. */
+  private dropOverlay(jobId: string): void {
+    const base = this.serverBase.get(jobId);
+    const current = this.jobs.get(jobId);
+    if (!base || !current) return;
+    if (current.status !== base.status || current.pending_intent) {
+      this.jobs.set(jobId, { ...base });
+    }
+  }
 
   private emit(): void {
     for (const listener of this.listeners) listener();
