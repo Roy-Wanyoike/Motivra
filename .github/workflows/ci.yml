@@ -14,6 +14,23 @@ permissions:
   contents: read
 
 jobs:
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository (full history for the commit range)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify DCO sign-offs
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            bash scripts/check_dco.sh "${{ github.event.pull_request.base.sha }}" HEAD
+          else
+            bash scripts/check_dco.sh "${{ github.event.before }}" HEAD
+          fi
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

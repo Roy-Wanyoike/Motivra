@@ -73,6 +73,17 @@ go test ./backend/...
 
 `pgtest` applies the per-domain migration chains (ADR-0003) before the tests run, so no manual migration step is needed. These suites execute automatically in CI once Actions billing is restored (issue #10).
 
+### 2b. DCO sign-off gate (contribution hygiene)
+
+Every content commit must carry a `Signed-off-by:` trailer matching its author (DCO 1.1 — see `CONTRIBUTING.md` and ADR-0006). CI enforces this on pull requests and pushes via the `dco` job (issue #54); run the same check locally before pushing:
+
+```bash
+bash scripts/check_dco.sh origin/main        # verify your branch's commits
+git commit -s                                # add the sign-off when committing
+```
+
+The script skips merge commits and GitHub web-flow commits (no content authorship), and fails with a rebase recipe when a commit is unsigned or mismatched. Commits merged before the gate existed are grandfathered (rationale on issue #54); all new commits must pass.
+
 ---
 
 ## 3. Full-stack path (everything in containers)
