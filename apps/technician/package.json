@@ -2,7 +2,7 @@
   "name": "@motivra/technician",
   "version": "0.1.0",
   "private": true,
-  "description": "Motivra Tech — offline-first technician field app (Expo). Foundation: outbox, sync skeleton, job screens, state guards (issue #29).",
+  "description": "Motivra Tech \u2014 offline-first technician field app (Expo). Foundation: outbox, sync skeleton, job screens, state guards (issue #29).",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",
@@ -20,5 +20,8 @@
     "@types/react": "19.2.7",
     "typescript": "5.9.3",
     "vitest": "5.0.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }
