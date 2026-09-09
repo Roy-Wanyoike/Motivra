@@ -1,10 +1,12 @@
 # Motivra Tech (technician) — Foundation
 
 React Native (Expo) offline-first field app. This is the **Wave 4 foundation** delivered
-against [issue #29](https://github.com/Roy-Wanyoike/Motivra/issues/29): the offline
-outbox, the sync reconciler skeleton, pure job-state guards mirroring
-`contracts/jobs`, and the first two screens wired through a tiny typed navigation
-context.
+against [issue #29](https://github.com/Roy-Wanyoike/Motivra/issues/29), extended by the
+full conflict-resolution protocol of
+[issue #55](https://github.com/Roy-Wanyoike/Motivra/issues/55): the offline outbox,
+the three-way-merge sync reconciler with 409-driven intent re-basing, pure job-state
+guards mirroring `contracts/jobs`, and the first two screens wired through a tiny typed
+navigation context.
 
 Owned by the Motivra Tech owner; see `docs/ARCHITECTURE.md` §2 — do not edit outside
 this zone.
@@ -56,7 +58,7 @@ apps/technician/
 │   ├── components/SyncBanner.tsx
 │   ├── state/job-store.ts      # in-memory read model (JobLocalStore impl)
 │   ├── mocks/jobs.ts           # stub data + SimulatedJobsApi dispatcher
-│   └── lib/                    # uuidv4 (crypto-based), JSON value types
+│   └── lib/                    # uuidv4 (expo-crypto backed), JSON value types
 └── tests/                      # vitest: idempotency, backoff, exhaustive guards, sync
 ```
 
@@ -91,18 +93,30 @@ contract against a simulated server that implements it.
 
 ## Sync reconciler
 
-`SyncReconciler.sync()` = **push** (drain outbox) then **pull** (cursor-paged server
-deltas applied to the local read model). Conflict handling placeholder
-(`src/sync/api.ts → shouldApplySnapshot`):
+`SyncReconciler.sync()` = **push** (drain outbox) → **re-base** (settle intents whose
+ops reached DONE/FAILED) → **pull** (cursor-paged server deltas through the three-way
+merge). The full conflict protocol (issue #55, `src/sync/merge.ts` + `src/sync/api.ts`
+→ `mergeIncoming`) — all rules enforced by `tests/sync.conflict.test.ts`:
 
-- Jobs with live local outbox intent are **not** overwritten by pulled snapshots —
-  explicitly **no last-write-wins**.
-- Once adopted, `status`, `technician_id` and timestamps are server-authoritative
-  (directive: prices, ownership, permissions, payment/inspection state, vehicle history
-  and technician status are never trusted from the client).
-- TODO (tracked in code): full three-way merge (base / client-intent / server-state)
-  with 409-driven intent re-basing; pull currently targets a future
-  `GET /v1/jobs/sync?cursor=` endpoint that the jobs contract does not expose yet.
+- **Server-authoritative fields**: once adopted, `status`, `technician_id`, timestamps,
+  prices, payment/inspection state, vehicle history and technician status are never
+  taken from the client. A live intent may only overlay `status`.
+- **Three-way merge (base / client-intent / server-state)**: drift detection compares
+  the pulled snapshot to the last synced base (`serverBaseForJob`); a live intent
+  survives a server move only if the proposed transition is still legal from the
+  server's new state (pure guard mirror).
+- **No last-write-wins**: a contradicting server state adopts the server snapshot AND
+  attaches an unacknowledged `local_conflict` to the display — visible in the job
+  detail screen until the technician acknowledges it (`clearConflict`).
+- **409-driven intent re-basing**: ops the server permanently rejects become
+  persistent `rejectedIntents()` records (deduped per op id); the optimistic overlay
+  is dropped and the verdict is re-presented — never silently overwritten.
+- **Intent already applied** (server status moved to the proposed target): server
+  snapshot wins outright, overlay dropped.
+- **Append-only data**: transition rows are insert-only; the merge carries them
+  through untouched, so conflicts on history are impossible by construction.
+- Pull still targets a future `GET /v1/jobs/sync?cursor=` endpoint that the jobs
+  contract does not expose yet (tracked contracts gap); tests inject the fake.
 
 ## Job state machine
 
@@ -129,13 +143,13 @@ rotation) is a follow-up.
 | Outbox core (schema, enqueue, drain, backoff+jitter, idempotent replay) | ✅ Real, unit-tested | All logic in `src/outbox` | — |
 | Outbox persistence | 🟡 Stub | Adapter interface + in-memory fake | expo-sqlite adapter (durable across restarts) |
 | Sync push (drain) | ✅ Real, unit-tested | Drives the outbox | — |
-| Sync pull | 🟡 Skeleton | Cursor-paged loop, conflict placeholder | Server has no delta endpoint yet (`contracts/jobs` change needed); app seeds from mocks |
+| Sync pull | 🟡 Merge protocol real, transport pending | Push → re-base → pull; three-way merge + 409 intent re-basing (issue #55, 17 rule tests) | Server has no delta endpoint yet (`contracts/jobs` change needed); app seeds from mocks |
 | Job state guards | ✅ Real, exhaustively tested | 18×18 matrix vs contract | Server remains authoritative; guard is predictive only |
 | Transport (fetch → jobs API) | 🔴 Stubbed | `OutboxDispatcher`/`PullFn` interfaces; contract-shaped payloads | `SimulatedJobsApi` accepts everything; real fetch client + error mapping is follow-up |
 | Screens (list, detail, timeline, actions) | 🟡 Real code, untested visually | RN components typed under `strict` | No rendering/E2E tests (needs RN test renderer / Maestro) |
 | Navigation | 🟡 Real, tiny | Typed route union + stack | expo-router migration documented below |
 | Connectivity detection | 🔴 Stubbed | Banner reflects last sync outcome | `@react-native-community/netinfo` follow-up |
-| UUIDv4 | ✅ Real | Web Crypto `getRandomValues` | `expo-crypto` swap once deps allowed; flagged fallback path exists |
+| UUIDv4 | ✅ Real | `expo-crypto` `randomUUID` (SDK 57 pin), Web Crypto fallbacks, no weak-randomness path | Node test runtime uses an aliased pure double (`tests/stubs/expo-crypto.ts`) |
 | Auth | 🔴 Not started | — | identity service integration (Wave 1 output exists server-side) |
 
 ## Upgrade path to expo-router

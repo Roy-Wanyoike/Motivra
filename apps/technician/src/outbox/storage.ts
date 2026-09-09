@@ -17,6 +17,11 @@ export interface OutboxStorageAdapter {
   getByIdempotencyKey(key: string): Promise<OutboxOperation | null>;
   /** Due = PENDING with next_attempt_at <= nowMs, oldest seq first. */
   listDue(nowMs: number, limit: number): Promise<OutboxOperation[]>;
+  /**
+   * All ops in the given state, newest seq first (used by the sync
+   * reconciler's re-basing step to find settled DONE/FAILED intents).
+   */
+  listByState(state: OutboxOperation['state'], limit: number): Promise<OutboxOperation[]>;
   update(op: OutboxOperation): Promise<void>;
   /** Counts by state — drives the UI badge. */
   countByState(): Promise<Record<OutboxOperation['state'], number>>;
@@ -79,6 +84,16 @@ export class InMemoryOutboxStorage implements OutboxStorageAdapter {
       throw new Error(`outbox: unknown operation ${op.id}`);
     }
     this.byId.set(op.id, { ...op });
+  }
+
+  async listByState(
+    state: OutboxOperation['state'],
+    limit: number,
+  ): Promise<OutboxOperation[]> {
+    return [...this.byId.values()]
+      .filter((op) => op.state === state)
+      .sort((a, b) => b.seq - a.seq) // newest first
+      .slice(0, limit);
   }
 
   async countByState(): Promise<Record<OutboxOperation['state'], number>> {
