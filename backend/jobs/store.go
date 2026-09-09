@@ -27,14 +27,21 @@ const (
 // Store is the persistence contract for the jobs domain. Implementations
 // must keep the job_transitions table append-only (insert-only) and must
 // perform multi-write operations in single transactions.
+//
+// Every read method takes a ReadScope derived from the authenticated
+// principal (ADR-0004: the repository layer enforces scope; there is no
+// unscoped variant). Rows the scope does not satisfy — including under the
+// zero value — yield not-found or an empty page exactly like a missing row,
+// so cross-principal probing cannot confirm existence.
 type Store interface {
 	// CreateRequest inserts r. It assigns r.ID when unset and populates
 	// r.CreatedAt and r.UpdatedAt from the database.
 	CreateRequest(ctx context.Context, r *ServiceRequest) error
 
-	// GetRequest returns the service request with the given id, or an
-	// error wrapping ErrRequestNotFound when it does not exist.
-	GetRequest(ctx context.Context, id uuid.UUID) (ServiceRequest, error)
+	// GetRequest returns the service request with the given id when it is
+	// visible to scope (its customer, or an operator), or an error wrapping
+	// ErrRequestNotFound otherwise — including when it does not exist.
+	GetRequest(ctx context.Context, id uuid.UUID, scope ReadScope) (ServiceRequest, error)
 
 	// CreateJob inserts j. When j.ServiceRequestID is set, the originating
 	// service request is atomically claimed in the same transaction: it
@@ -43,9 +50,10 @@ type Store interface {
 	// j.ServiceRequestID is nil, j is inserted as a standalone job.
 	CreateJob(ctx context.Context, j *Job) error
 
-	// GetJob returns the job with the given id, or an error wrapping
-	// ErrJobNotFound when it does not exist.
-	GetJob(ctx context.Context, id uuid.UUID) (Job, error)
+	// GetJob returns the job with the given id when it is visible to scope
+	// (its customer, the assigned technician, or an operator), or an error
+	// wrapping ErrJobNotFound otherwise — including when it does not exist.
+	GetJob(ctx context.Context, id uuid.UUID, scope ReadScope) (Job, error)
 
 	// UpdateJobStatus moves the job to newStatus and appends one
 	// job_transitions row recording the previous status in a single
@@ -68,14 +76,16 @@ type Store interface {
 	// wrapping ErrJobNotFound when the job does not exist.
 	AcceptAssignment(ctx context.Context, jobID uuid.UUID, technicianID uuid.UUID) error
 
-	// ListJobsByStatus returns jobs in the given status, newest first.
-	// limit <= 0 selects defaultListLimit and limit is capped at
-	// maxListLimit; offset < 0 is treated as 0.
-	ListJobsByStatus(ctx context.Context, status Status, limit, offset int) ([]Job, error)
+	// ListJobsByStatus returns jobs in the given status, newest first,
+	// limited to those visible to scope. limit <= 0 selects
+	// defaultListLimit and limit is capped at maxListLimit; offset < 0 is
+	// treated as 0.
+	ListJobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error)
 
 	// ListTransitions returns the job's transition audit trail in
-	// chronological order (oldest first).
-	ListTransitions(ctx context.Context, jobID uuid.UUID) ([]JobTransition, error)
+	// chronological order (oldest first), limited to rows the scope can
+	// see; an invisible or unknown job yields an empty trail.
+	ListTransitions(ctx context.Context, jobID uuid.UUID, scope ReadScope) ([]JobTransition, error)
 }
 
 // PostgresStore implements Store on PostgreSQL through pgx.
@@ -118,12 +128,19 @@ func (s *PostgresStore) CreateRequest(ctx context.Context, r *ServiceRequest) er
 	return nil
 }
 
-// GetRequest implements Store.
-func (s *PostgresStore) GetRequest(ctx context.Context, id uuid.UUID) (ServiceRequest, error) {
-	row := s.pool.QueryRow(ctx, `
-                SELECT `+requestColumns+`
+// GetRequest implements Store. The scope filters the row at the query
+// level: non-operators only ever match their own requests, so an unknown
+// and a foreign request are indistinguishable (no existence leak).
+func (s *PostgresStore) GetRequest(ctx context.Context, id uuid.UUID, scope ReadScope) (ServiceRequest, error) {
+	query := `SELECT ` + requestColumns + `
                 FROM service_requests
-                WHERE id = $1`, id)
+                WHERE id = $1`
+	args := []any{id}
+	if !scope.Operator {
+		query += ` AND customer_id = $2`
+		args = append(args, scope.ViewerID)
+	}
+	row := s.pool.QueryRow(ctx, query, args...)
 	r, err := scanRequest(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -185,12 +202,19 @@ func (s *PostgresStore) CreateJob(ctx context.Context, j *Job) error {
 	return nil
 }
 
-// GetJob implements Store.
-func (s *PostgresStore) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
-	row := s.pool.QueryRow(ctx, `
-                SELECT `+jobColumns+`
+// GetJob implements Store. The scope filters the row at the query level:
+// non-operators match only jobs they own or are assigned, so an unknown
+// and a foreign job are indistinguishable (no existence leak).
+func (s *PostgresStore) GetJob(ctx context.Context, id uuid.UUID, scope ReadScope) (Job, error) {
+	query := `SELECT ` + jobColumns + `
                 FROM jobs
-                WHERE id = $1`, id)
+                WHERE id = $1`
+	args := []any{id}
+	if !scope.Operator {
+		query += ` AND (customer_id = $2 OR technician_id = $2)`
+		args = append(args, scope.ViewerID)
+	}
+	row := s.pool.QueryRow(ctx, query, args...)
 	j, err := scanJob(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -353,8 +377,10 @@ func (s *PostgresStore) AcceptAssignment(ctx context.Context, jobID uuid.UUID, t
 	return nil
 }
 
-// ListJobsByStatus implements Store.
-func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, limit, offset int) ([]Job, error) {
+// ListJobsByStatus implements Store. Operator scopes see the platform-wide
+// page; any other scope is filtered to owned/assigned rows at the query
+// level, so the route's RBAC gate is never the only enforcement layer.
+func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
@@ -364,12 +390,23 @@ func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, lim
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.pool.Query(ctx, `
-                SELECT `+jobColumns+`
+	query := `SELECT ` + jobColumns + `
                 FROM jobs
-                WHERE status = $1
+                WHERE status = $1`
+	args := []any{status}
+	if scope.Operator {
+		query += `
                 ORDER BY created_at DESC
-                LIMIT $2 OFFSET $3`, status, limit, offset)
+                LIMIT $2 OFFSET $3`
+		args = append(args, limit, offset)
+	} else {
+		query += `
+                AND (customer_id = $2 OR technician_id = $2)
+                ORDER BY created_at DESC
+                LIMIT $3 OFFSET $4`
+		args = append(args, scope.ViewerID, limit, offset)
+	}
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: list jobs by status: %w", err)
 	}
@@ -389,13 +426,26 @@ func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, lim
 	return out, nil
 }
 
-// ListTransitions implements Store.
-func (s *PostgresStore) ListTransitions(ctx context.Context, jobID uuid.UUID) ([]JobTransition, error) {
-	rows, err := s.pool.Query(ctx, `
+// ListTransitions implements Store. The EXISTS subquery re-applies the job
+// visibility predicate, so transitions of invisible jobs return an empty
+// trail exactly like unknown jobs.
+func (s *PostgresStore) ListTransitions(ctx context.Context, jobID uuid.UUID, scope ReadScope) ([]JobTransition, error) {
+	query := `
                 SELECT id, job_id, from_status, to_status, actor_id, reason, created_at
                 FROM job_transitions
-                WHERE job_id = $1
-                ORDER BY created_at ASC, id ASC`, jobID)
+                WHERE job_id = $1`
+	args := []any{jobID}
+	if !scope.Operator {
+		query += `
+                AND EXISTS (
+                        SELECT 1 FROM jobs j
+                        WHERE j.id = job_transitions.job_id
+                                AND (j.customer_id = $2 OR j.technician_id = $2))`
+		args = append(args, scope.ViewerID)
+	}
+	query += `
+                ORDER BY created_at ASC, id ASC`
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: list transitions: %w", err)
 	}

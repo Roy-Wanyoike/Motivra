@@ -26,8 +26,9 @@ const (
 )
 
 // dispatchRoles are the roles allowed to move jobs through the state
-// machine and to assign technicians.
-var dispatchRoles = []string{RoleDispatcher, RoleAdmin, RoleSuperAdmin}
+// machine and to assign technicians: the platform-operator set, which also
+// defines the operator read scope.
+var dispatchRoles = OperatorRoles
 
 // maxRequestBytes caps JSON request bodies accepted by the handlers.
 const maxRequestBytes int64 = 64 << 10
@@ -35,13 +36,18 @@ const maxRequestBytes int64 = 64 << 10
 // Routes registers the Jobs HTTP API on r:
 //
 //	POST /v1/requests                        create a service request (any authenticated user)
-//	POST /v1/requests/{requestID}/job        convert a request into a job (any authenticated user)
+//	POST /v1/requests/{requestID}/job        convert a request into a job (its customer or an operator)
 //	GET  /v1/jobs?status=&limit=&offset      list jobs by status (DISPATCHER/ADMIN/SUPER_ADMIN)
-//	GET  /v1/jobs/{jobID}                    fetch one job (any authenticated user)
+//	GET  /v1/jobs/{jobID}                    fetch one job (its customer, the assigned technician, or an operator)
 //	POST /v1/jobs/{jobID}/transitions        move a job through the machine (DISPATCHER/ADMIN/SUPER_ADMIN)
-//	GET  /v1/jobs/{jobID}/transitions        read the transition audit trail (any authenticated user)
+//	GET  /v1/jobs/{jobID}/transitions        read the transition audit trail (same visibility as fetching the job)
 //	POST /v1/jobs/{jobID}/assignments        dispatch a technician (DISPATCHER/ADMIN/SUPER_ADMIN)
 //	POST /v1/jobs/{jobID}/accept             technician accepts the assignment (TECHNICIAN)
+//
+// Every read is scoped by ReadScope, derived exclusively from the validated
+// access-token claims (never from client input). Invisible and unknown
+// resources both answer 404, so responses leak no existence information
+// (ADR-0004 cross-tenant denial).
 //
 // requireAuth wraps every handler with the platform authentication gate
 // (pass platform.RequireAuthenticated). Role-gated routes are wrapped with
@@ -85,6 +91,22 @@ type transitionRequest struct {
 // assignmentRequest is the POST /v1/jobs/{jobID}/assignments body.
 type assignmentRequest struct {
 	TechnicianID *uuid.UUID `json:"technician_id"`
+}
+
+// readScope derives the caller's ReadScope from the validated access token
+// in the request context — never from any client-supplied field. The viewer
+// is the token subject; platform-operator roles (dispatchRoles) read across
+// resources. ok is false when no usable authenticated principal is present.
+func readScope(r *http.Request) (scope ReadScope, ok bool) {
+	claims, present := platform.ClaimsFromContext(r.Context())
+	if !present {
+		return ReadScope{}, false
+	}
+	viewer, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		return ReadScope{}, false
+	}
+	return ReadScope{ViewerID: viewer, Operator: IsOperatorRole(claims.Role)}, true
 }
 
 // requestResponse is the wire form of a service request.
@@ -172,8 +194,11 @@ func (s *Service) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreateJobFromRequest implements POST /v1/requests/{requestID}/job.
+// Only the request's customer or an operator can convert it; anyone else
+// gets the same 404 as an unknown request.
 func (s *Service) handleCreateJobFromRequest(w http.ResponseWriter, r *http.Request) {
-	if _, ok := platform.ClaimsFromContext(r.Context()); !ok {
+	scope, ok := readScope(r)
+	if !ok {
 		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
@@ -182,7 +207,7 @@ func (s *Service) handleCreateJobFromRequest(w http.ResponseWriter, r *http.Requ
 		platform.WriteError(w, err)
 		return
 	}
-	job, err := s.CreateJobFromRequest(r.Context(), requestID)
+	job, err := s.CreateJobFromRequest(r.Context(), requestID, scope)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -190,9 +215,11 @@ func (s *Service) handleCreateJobFromRequest(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusCreated, newJobResponse(&job))
 }
 
-// handleGetJob implements GET /v1/jobs/{jobID}.
+// handleGetJob implements GET /v1/jobs/{jobID}. The job is read through
+// the caller's scope: a foreign job answers the same 404 as a missing one.
 func (s *Service) handleGetJob(w http.ResponseWriter, r *http.Request) {
-	if _, ok := platform.ClaimsFromContext(r.Context()); !ok {
+	scope, ok := readScope(r)
+	if !ok {
 		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
@@ -201,7 +228,7 @@ func (s *Service) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, err)
 		return
 	}
-	job, err := s.GetJob(r.Context(), jobID)
+	job, err := s.GetJob(r.Context(), jobID, scope)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -238,11 +265,16 @@ func (s *Service) handleTransition(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, platform.ErrUnauthorized("authenticated subject is not a user identifier"))
 		return
 	}
-	if err := s.Transition(r.Context(), jobID, to, &actorID, req.Reason); err != nil {
+	scope, ok := readScope(r)
+	if !ok {
+		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+		return
+	}
+	if err := s.Transition(r.Context(), jobID, to, &actorID, req.Reason, scope); err != nil {
 		writeDomainError(w, err)
 		return
 	}
-	job, err := s.GetJob(r.Context(), jobID)
+	job, err := s.GetJob(r.Context(), jobID, scope)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -276,11 +308,16 @@ func (s *Service) handleAssign(w http.ResponseWriter, r *http.Request) {
 	if actorID, parseErr := uuid.Parse(claims.UserID); parseErr == nil {
 		assignedBy = &actorID
 	}
-	if err := s.AssignTechnician(r.Context(), jobID, *req.TechnicianID, assignedBy); err != nil {
+	scope, ok := readScope(r)
+	if !ok {
+		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+		return
+	}
+	if err := s.AssignTechnician(r.Context(), jobID, *req.TechnicianID, assignedBy, scope); err != nil {
 		writeDomainError(w, err)
 		return
 	}
-	job, err := s.GetJob(r.Context(), jobID)
+	job, err := s.GetJob(r.Context(), jobID, scope)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -289,7 +326,9 @@ func (s *Service) handleAssign(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAccept implements POST /v1/jobs/{jobID}/accept. The authenticated
-// TECHNICIAN (claims.UserID) is the accepting technician.
+// TECHNICIAN (claims.UserID) is the accepting technician, and the job is
+// read through their own scope: technicians cannot probe jobs they are not
+// assigned to (404, no existence leak).
 func (s *Service) handleAccept(w http.ResponseWriter, r *http.Request) {
 	claims, ok := platform.ClaimsFromContext(r.Context())
 	if !ok {
@@ -306,16 +345,24 @@ func (s *Service) handleAccept(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, platform.ErrUnauthorized("authenticated subject is not a user identifier"))
 		return
 	}
-	if err := s.Accept(r.Context(), jobID, technicianID); err != nil {
+	scope, ok := readScope(r)
+	if !ok {
+		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+		return
+	}
+	if err := s.Accept(r.Context(), jobID, technicianID, scope); err != nil {
 		writeDomainError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleListTransitions implements GET /v1/jobs/{jobID}/transitions.
+// handleListTransitions implements GET /v1/jobs/{jobID}/transitions. The
+// job must be visible to the caller's scope first (else 404), then the
+// trail is read through the same scope.
 func (s *Service) handleListTransitions(w http.ResponseWriter, r *http.Request) {
-	if _, ok := platform.ClaimsFromContext(r.Context()); !ok {
+	scope, ok := readScope(r)
+	if !ok {
 		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
@@ -324,7 +371,11 @@ func (s *Service) handleListTransitions(w http.ResponseWriter, r *http.Request) 
 		platform.WriteError(w, err)
 		return
 	}
-	transitions, err := s.Transitions(r.Context(), jobID)
+	if _, err := s.GetJob(r.Context(), jobID, scope); err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	transitions, err := s.Transitions(r.Context(), jobID, scope)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -336,9 +387,13 @@ func (s *Service) handleListTransitions(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleListJobs implements GET /v1/jobs?status=&limit=&offset.
+// handleListJobs implements GET /v1/jobs?status=&limit=&offset. The route
+// is RBAC-gated to platform operators, and the store still scopes the page
+// by the caller (defense in depth: middleware alone is never the only
+// check, ADR-0004).
 func (s *Service) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	if _, ok := platform.ClaimsFromContext(r.Context()); !ok {
+	scope, ok := readScope(r)
+	if !ok {
 		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
@@ -359,7 +414,7 @@ func (s *Service) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, err)
 		return
 	}
-	jobs, err := s.JobsByStatus(r.Context(), status, limit, offset)
+	jobs, err := s.JobsByStatus(r.Context(), status, limit, offset, scope)
 	if err != nil {
 		writeDomainError(w, err)
 		return

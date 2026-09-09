@@ -54,14 +54,25 @@ func (f *fakeStore) CreateRequest(_ context.Context, r *ServiceRequest) error {
 	return nil
 }
 
-func (f *fakeStore) GetRequest(_ context.Context, id uuid.UUID) (ServiceRequest, error) {
+func (f *fakeStore) GetRequest(_ context.Context, id uuid.UUID, scope ReadScope) (ServiceRequest, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.requests[id]
-	if !ok {
+	if !ok || !requestVisible(r, scope) {
 		return ServiceRequest{}, fmt.Errorf("jobs: get service request %s: %w", id, ErrRequestNotFound)
 	}
 	return r, nil
+}
+
+// requestVisible mirrors the PostgresStore scope predicate for requests.
+func requestVisible(r ServiceRequest, scope ReadScope) bool {
+	return scope.Operator || r.CustomerID == scope.ViewerID
+}
+
+// jobVisible mirrors the PostgresStore scope predicate for jobs.
+func jobVisible(j Job, scope ReadScope) bool {
+	return scope.Operator || j.CustomerID == scope.ViewerID ||
+		(j.TechnicianID != nil && *j.TechnicianID == scope.ViewerID)
 }
 
 func (f *fakeStore) CreateJob(_ context.Context, j *Job) error {
@@ -86,11 +97,11 @@ func (f *fakeStore) CreateJob(_ context.Context, j *Job) error {
 	return nil
 }
 
-func (f *fakeStore) GetJob(_ context.Context, id uuid.UUID) (Job, error) {
+func (f *fakeStore) GetJob(_ context.Context, id uuid.UUID, scope ReadScope) (Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.jobs[id]
-	if !ok {
+	if !ok || !jobVisible(j, scope) {
 		return Job{}, fmt.Errorf("jobs: get job %s: %w", id, ErrJobNotFound)
 	}
 	return j, nil
@@ -168,12 +179,12 @@ func (f *fakeStore) AcceptAssignment(_ context.Context, jobID uuid.UUID, technic
 	return nil
 }
 
-func (f *fakeStore) ListJobsByStatus(_ context.Context, status Status, limit, offset int) ([]Job, error) {
+func (f *fakeStore) ListJobsByStatus(_ context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Job
 	for _, j := range f.jobs {
-		if j.Status == status {
+		if j.Status == status && jobVisible(j, scope) {
 			out = append(out, j)
 		}
 	}
@@ -188,12 +199,16 @@ func (f *fakeStore) ListJobsByStatus(_ context.Context, status Status, limit, of
 	return out, nil
 }
 
-func (f *fakeStore) ListTransitions(_ context.Context, jobID uuid.UUID) ([]JobTransition, error) {
+func (f *fakeStore) ListTransitions(_ context.Context, jobID uuid.UUID, scope ReadScope) ([]JobTransition, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []JobTransition
+	j, visible := f.jobs[jobID]
+	if !visible {
+		return out, nil
+	}
 	for _, t := range f.transitions {
-		if t.JobID == jobID {
+		if t.JobID == jobID && jobVisible(j, scope) {
 			out = append(out, t)
 		}
 	}
@@ -245,6 +260,13 @@ func newFixture() (*Service, *fakeStore, *capturePublisher) {
 	return NewService(store, pub), store, pub
 }
 
+// opScope is the platform-operator read scope for tests that exercise
+// dispatcher/admin flows directly against the service or store.
+func opScope() ReadScope { return ReadScope{ViewerID: uuid.New(), Operator: true} }
+
+// viewScope returns the non-operator read scope of a single viewer.
+func viewScope(id uuid.UUID) ReadScope { return ReadScope{ViewerID: id} }
+
 func sampleRequest() *ServiceRequest {
 	return &ServiceRequest{
 		CustomerID:  uuid.New(),
@@ -255,8 +277,9 @@ func sampleRequest() *ServiceRequest {
 // driveDispatching moves a fresh job CREATED -> TRIAGING -> DISPATCHING.
 func driveDispatching(t *testing.T, svc *Service, jobID uuid.UUID) {
 	t.Helper()
-	require.NoError(t, svc.Transition(context.Background(), jobID, StatusTriaging, nil, "triaged"))
-	require.NoError(t, svc.Transition(context.Background(), jobID, StatusDispatching, nil, "dispatching"))
+	op := opScope()
+	require.NoError(t, svc.Transition(context.Background(), jobID, StatusTriaging, nil, "triaged", op))
+	require.NoError(t, svc.Transition(context.Background(), jobID, StatusDispatching, nil, "dispatching", op))
 }
 
 func TestCreateRequestPublishesReceivedEvent(t *testing.T) {
@@ -270,7 +293,7 @@ func TestCreateRequestPublishesReceivedEvent(t *testing.T) {
 	assert.Equal(t, RequestStatusReceived, r.Status)
 	assert.NotZero(t, r.CreatedAt)
 
-	stored, err := store.GetRequest(ctx, r.ID)
+	stored, err := store.GetRequest(ctx, r.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, RequestStatusReceived, stored.Status)
 
@@ -309,7 +332,7 @@ func TestCreateJobFromRequestHappyPath(t *testing.T) {
 	r := sampleRequest()
 	require.NoError(t, svc.CreateRequest(ctx, r))
 
-	job, err := svc.CreateJobFromRequest(ctx, r.ID)
+	job, err := svc.CreateJobFromRequest(ctx, r.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusCreated, job.Status)
 	require.NotNil(t, job.ServiceRequestID)
@@ -317,7 +340,7 @@ func TestCreateJobFromRequestHappyPath(t *testing.T) {
 	assert.Equal(t, r.CustomerID, job.CustomerID)
 	assert.Equal(t, r.Description, job.ProblemSummary)
 
-	stored, err := store.GetRequest(ctx, r.ID)
+	stored, err := store.GetRequest(ctx, r.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, RequestStatusConverted, stored.Status, "request must be marked converted")
 
@@ -337,10 +360,10 @@ func TestCreateJobFromRequestDoubleConversionConflicts(t *testing.T) {
 
 	r := sampleRequest()
 	require.NoError(t, svc.CreateRequest(ctx, r))
-	_, err := svc.CreateJobFromRequest(ctx, r.ID)
+	_, err := svc.CreateJobFromRequest(ctx, r.ID, opScope())
 	require.NoError(t, err)
 
-	_, err = svc.CreateJobFromRequest(ctx, r.ID)
+	_, err = svc.CreateJobFromRequest(ctx, r.ID, opScope())
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrAlreadyConverted), "want ErrAlreadyConverted, got %v", err)
 	assert.Len(t, pub.ofType(t, EventJobCreated), 1, "second conversion must not publish")
@@ -353,9 +376,9 @@ func TestTransitionPublishesStatusChanged(t *testing.T) {
 	job := jobInStore(t, store, StatusCreated)
 	actor := uuid.New()
 
-	require.NoError(t, svc.Transition(ctx, job.ID, StatusTriaging, &actor, "customer request triaged"))
+	require.NoError(t, svc.Transition(ctx, job.ID, StatusTriaging, &actor, "customer request triaged", opScope()))
 
-	stored, err := store.GetJob(ctx, job.ID)
+	stored, err := store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusTriaging, stored.Status)
 
@@ -370,7 +393,7 @@ func TestTransitionPublishesStatusChanged(t *testing.T) {
 	require.NotNil(t, payload.ActorID)
 	assert.Equal(t, actor, *payload.ActorID)
 
-	transitions, err := store.ListTransitions(ctx, job.ID)
+	transitions, err := store.ListTransitions(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	require.Len(t, transitions, 1)
 	assert.Equal(t, StatusCreated, transitions[0].FromStatus)
@@ -383,16 +406,16 @@ func TestIllegalTransitionRejectedWithoutPublishing(t *testing.T) {
 
 	job := jobInStore(t, store, StatusCreated)
 
-	err := svc.Transition(ctx, job.ID, StatusRepairing, nil, "shortcut")
+	err := svc.Transition(ctx, job.ID, StatusRepairing, nil, "shortcut", opScope())
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrConflict), "want ErrConflict, got %v", err)
 	assert.Zero(t, pub.count(), "illegal transition must publish nothing")
 
-	stored, err := store.GetJob(ctx, job.ID)
+	stored, err := store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusCreated, stored.Status, "illegal transition must not mutate")
 
-	transitions, err := store.ListTransitions(ctx, job.ID)
+	transitions, err := store.ListTransitions(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Empty(t, transitions, "illegal transition must leave no audit row")
 }
@@ -406,9 +429,9 @@ func TestAssignmentFlowPublishesEvents(t *testing.T) {
 
 	tech := uuid.New()
 	dispatcher := uuid.New()
-	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, &dispatcher))
+	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, &dispatcher, opScope()))
 
-	stored, err := store.GetJob(ctx, job.ID)
+	stored, err := store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusAssigned, stored.Status)
 	require.NotNil(t, stored.TechnicianID)
@@ -424,9 +447,9 @@ func TestAssignmentFlowPublishesEvents(t *testing.T) {
 	assert.Equal(t, dispatcher, *payload.AssignedBy)
 
 	// Acceptance: ASSIGNED -> ACCEPTED with a status.changed event.
-	require.NoError(t, svc.Accept(ctx, job.ID, tech))
+	require.NoError(t, svc.Accept(ctx, job.ID, tech, opScope()))
 
-	stored, err = store.GetJob(ctx, job.ID)
+	stored, err = store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusAccepted, stored.Status)
 
@@ -446,7 +469,7 @@ func TestAssignmentFlowPublishesEvents(t *testing.T) {
 	assert.Equal(t, job.ID, changePayload.JobID)
 	assert.Equal(t, "technician accepted assignment", changePayload.Reason)
 
-	transitions, err := store.ListTransitions(ctx, job.ID)
+	transitions, err := store.ListTransitions(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	require.Len(t, transitions, 4) // TRIAGING, DISPATCHING, ASSIGNED, ACCEPTED
 	assert.Equal(t, StatusCreated, transitions[0].FromStatus)
@@ -466,10 +489,10 @@ func TestReassignmentGoesThroughDispatching(t *testing.T) {
 	driveDispatching(t, svc, job.ID)
 
 	tech1, tech2, dispatcher := uuid.New(), uuid.New(), uuid.New()
-	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech1, &dispatcher))
-	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech2, &dispatcher))
+	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech1, &dispatcher, opScope()))
+	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech2, &dispatcher, opScope()))
 
-	stored, err := store.GetJob(ctx, job.ID)
+	stored, err := store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusAssigned, stored.Status)
 	require.NotNil(t, stored.TechnicianID)
@@ -493,7 +516,7 @@ func TestReassignmentGoesThroughDispatching(t *testing.T) {
 	require.NoError(t, json.Unmarshal(assigned[1].Payload, &lastAssigned))
 	assert.Equal(t, tech2, lastAssigned.TechnicianID)
 
-	transitions, err := store.ListTransitions(ctx, job.ID)
+	transitions, err := store.ListTransitions(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	require.Len(t, transitions, 5) // TRIAGING, DISPATCHING, ASSIGNED, ASSIGNED->DISPATCHING, DISPATCHING->ASSIGNED
 	assert.Equal(t, StatusAssigned, transitions[3].FromStatus)
@@ -519,15 +542,15 @@ func TestReassignSameTechnicianConflicts(t *testing.T) {
 	driveDispatching(t, svc, job.ID)
 
 	tech := uuid.New()
-	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, nil))
+	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, nil, opScope()))
 
 	before := pub.count()
-	err := svc.AssignTechnician(ctx, job.ID, tech, nil)
+	err := svc.AssignTechnician(ctx, job.ID, tech, nil, opScope())
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrConflict), "want ErrConflict, got %v", err)
 	assert.Equal(t, before, pub.count(), "conflict must publish nothing")
 
-	stored, err := store.GetJob(ctx, job.ID)
+	stored, err := store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusAssigned, stored.Status)
 }
@@ -539,16 +562,19 @@ func TestAcceptRejectsWrongTechnician(t *testing.T) {
 	job := jobInStore(t, store, StatusCreated)
 	driveDispatching(t, svc, job.ID)
 	tech := uuid.New()
-	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, nil))
+	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, nil, opScope()))
 
 	other := uuid.New()
 	before := pub.count()
-	err := svc.Accept(ctx, job.ID, other)
+	// The accepting technician reads through their own scope, so a job they
+	// are not assigned to is not-found — indistinguishable from a job that
+	// does not exist (no existence leak).
+	err := svc.Accept(ctx, job.ID, other, viewScope(other))
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrConflict), "want ErrConflict, got %v", err)
+	assert.True(t, errors.Is(err, ErrJobNotFound), "want ErrJobNotFound, got %v", err)
 	assert.Equal(t, before, pub.count())
 
-	stored, err := store.GetJob(ctx, job.ID)
+	stored, err := store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusAssigned, stored.Status)
 }
@@ -560,7 +586,7 @@ func TestFullHappyChainReachesCompleted(t *testing.T) {
 	job := jobInStore(t, store, StatusCreated)
 	driveDispatching(t, svc, job.ID)
 	tech := uuid.New()
-	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, nil))
+	require.NoError(t, svc.AssignTechnician(ctx, job.ID, tech, nil, opScope()))
 
 	steps := []struct {
 		to     Status
@@ -579,14 +605,14 @@ func TestFullHappyChainReachesCompleted(t *testing.T) {
 		{StatusCompleted, "done"},
 	}
 	for _, step := range steps {
-		require.NoError(t, svc.Transition(ctx, job.ID, step.to, &tech, step.reason), "step to %s", step.to)
+		require.NoError(t, svc.Transition(ctx, job.ID, step.to, &tech, step.reason, opScope()), "step to %s", step.to)
 	}
-	stored, err := store.GetJob(ctx, job.ID)
+	stored, err := store.GetJob(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, stored.Status)
 	assert.True(t, IsTerminal(stored.Status))
 
-	transitions, err := store.ListTransitions(ctx, job.ID)
+	transitions, err := store.ListTransitions(ctx, job.ID, opScope())
 	require.NoError(t, err)
 	require.Len(t, transitions, 14) // 3 pre-acceptance moves + 11 chain steps
 	assert.Equal(t, StatusVerification, transitions[len(transitions)-1].FromStatus)
@@ -598,13 +624,13 @@ func TestTerminalStatesImmutable(t *testing.T) {
 		job := jobInStore(t, store, terminal)
 
 		for _, to := range AllStatuses() {
-			err := svc.Transition(context.Background(), job.ID, to, nil, "attempt")
+			err := svc.Transition(context.Background(), job.ID, to, nil, "attempt", opScope())
 			assert.True(t, errors.Is(err, ErrConflict),
 				"terminal %s -> %s must conflict, got %v", terminal, to, err)
 		}
-		err := svc.AssignTechnician(context.Background(), job.ID, uuid.New(), nil)
+		err := svc.AssignTechnician(context.Background(), job.ID, uuid.New(), nil, opScope())
 		assert.True(t, errors.Is(err, ErrConflict), "terminal %s cannot be assigned: %v", terminal, err)
-		err = svc.Accept(context.Background(), job.ID, uuid.New())
+		err = svc.Accept(context.Background(), job.ID, uuid.New(), opScope())
 		assert.True(t, errors.Is(err, ErrConflict), "terminal %s cannot be accepted: %v", terminal, err)
 		assert.Zero(t, pub.count(), "terminal job must publish nothing")
 	}
@@ -618,26 +644,26 @@ func TestJobsByStatusListsAndPaginates(t *testing.T) {
 	dispatching := jobInStore(t, store, StatusDispatching)
 	jobInStore(t, store, StatusCreated)
 
-	got, err := svc.JobsByStatus(ctx, StatusCreated, 0, 0)
+	got, err := svc.JobsByStatus(ctx, StatusCreated, 0, 0, opScope())
 	require.NoError(t, err)
 	assert.Len(t, got, 2)
 
-	got, err = svc.JobsByStatus(ctx, StatusDispatching, 10, 0)
+	got, err = svc.JobsByStatus(ctx, StatusDispatching, 10, 0, opScope())
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, dispatching.ID, got[0].ID)
 
-	got, err = svc.JobsByStatus(ctx, StatusCreated, 1, 1)
+	got, err = svc.JobsByStatus(ctx, StatusCreated, 1, 1, opScope())
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
 	assert.Equal(t, created.ID, got[0].ID, "offset must skip the newest job")
 
-	_, err = svc.JobsByStatus(ctx, Status("NOT_A_STATUS"), 10, 0)
+	_, err = svc.JobsByStatus(ctx, Status("NOT_A_STATUS"), 10, 0, opScope())
 	require.Error(t, err)
 
 	// Terminal and dead-end statuses are valid filters too.
 	for _, status := range []Status{StatusCompleted, StatusCancelled, StatusFailed, StatusEscalated} {
-		_, err := svc.JobsByStatus(ctx, status, 10, 0)
+		_, err := svc.JobsByStatus(ctx, status, 10, 0, opScope())
 		assert.NoError(t, err, "status %s must be a valid filter", status)
 	}
 }
@@ -649,9 +675,9 @@ func TestNilPublisherIsTolerated(t *testing.T) {
 
 	r := sampleRequest()
 	require.NoError(t, svc.CreateRequest(ctx, r))
-	job, err := svc.CreateJobFromRequest(ctx, r.ID)
+	job, err := svc.CreateJobFromRequest(ctx, r.ID, opScope())
 	require.NoError(t, err)
-	require.NoError(t, svc.Transition(ctx, job.ID, StatusTriaging, nil, "ok"))
+	require.NoError(t, svc.Transition(ctx, job.ID, StatusTriaging, nil, "ok", opScope()))
 }
 
 func TestPublisherFailurePropagates(t *testing.T) {
