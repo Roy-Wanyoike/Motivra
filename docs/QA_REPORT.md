@@ -270,3 +270,158 @@ Totals: **14 merged PRs**, 3 closed-unmerged, 1 open; **17 issues**: 13 closed, 
 | Overall verdict | **Code foundation verified green locally; NOT production-ready. Gated by #10 (CI), #28 (hardening), #29 (mobile), Wave 5 (payments), managed infra, and missing runtime deployment evidence.** |
 
 *This report contains no vanity claims. Every gate result above was produced by a command executed against the verification commit during this session; sandbox-impossible checks are labeled as such.*
+
+---
+
+## Round 2 (post-hardening verification)
+
+**Issue:** #50 · **Agent:** qa-02 · **Date:** 2026-09-09 (UTC)
+**Verification commit:** `6732f5ac6461c90e8a6bd9757f718e1405aa36e6` (fresh clone of `main` = merge of PR #49)
+**Method:** identical honesty rules to Round 1 — every result below was produced by a command executed in this session against that fresh clone; nothing carried over from PR bodies or worklogs. Sandbox-impossible checks are marked **not executable here** with the reason. This section is **append-only**; Round 1 content above is unmodified (verified by diff at commit time).
+
+### R2.1 What landed since Round 1 (PR #37 → now)
+
+| PR | Merged (UTC) | Summary (verified by re-running its gates, not taken from its body) |
+|---|---|---|
+| #36 | 2026-09-08 16:16 | Dependabot: postcss 8.5.23 + next bumps — **all 4 Round-1 Dependabot alerts now closed** (repo API: was 4 open, now 1 open, unrelated) |
+| #37 | 2026-09-08 16:15 | Round-1 QA report (the document this section extends) |
+| #39 | 2026-09-08 16:19 | Governance: Integration Window 2 closeout (agents.md §"Integration Window 2") |
+| #40 | 2026-09-09 08:01 | Dependabot: grpc 1.83.1 → 1.83.2 (go.mod) |
+| #41 | 2026-09-09 08:36 | Dependabot: vitest + @vitest/mocker bump (apps/customer) |
+| #43 | 2026-09-09 08:35 | **Motivra Tech mobile foundation** (`apps/technician`): offline outbox (dedupe, lease-reclaim, backoff+jitter, dead-letter), sync reconciler, job-state guard mirror, screens — 28 vitest |
+| #45 | 2026-09-09 09:35 | Dependabot: vitest bump (apps/technician) |
+| #46 | 2026-09-09 09:02 | **`GET /v1/vehicles`** — claim-derived tenant-scoped listing with keyset pagination (closes #38); contract + implementation + scoped tests |
+| #47 | 2026-09-09 09:02 | **Tenant scoping on reads** — identity/jobs/dispatch read paths enforced at query level, 8 isolation tests (part of #28) |
+| #48 | 2026-09-09 09:35 | Web: vehicle list wired to the listing contract (runtime states, keyset "Load more", deep-links) — 5 new tests (17 total) |
+| #49 | 2026-09-09 09:58 | **Event publishing** — identity/jobs/vehicles build NATS publishers when `MOTIVRA_NATS_URL` is set; shared `backend/platform/pgtest` harness; **6 PG-gated integration tests + 1 NATS-gated e2e** (closes #28) |
+
+Totals: **25 merged PRs** lifetime (24 before this report's PR). Issues: **18 closed** — #28, #29, #38 all closed by the PRs above. **Open issues: #10 (CI billing lock, owner action) and #50 (this report).**
+
+### R2.2 Gate results (fresh clone, real outputs)
+
+**Backend** (Go `go1.27.1 linux/amd64`; tools at `/home/z/my-project/tools/go/bin`):
+
+| Gate | Command | Result |
+|---|---|---|
+| Format | `gofmt -l .` | **PASS** — empty output, exit 0 |
+| Static analysis | `go vet ./...` | **PASS** — no findings, exit 0 |
+| Build | `go build ./...` | **PASS** — exit 0 |
+| Test suite | `go test ./...` | **PASS** — exit 0; per-package below |
+| Race detector | `go test -race ./backend/...` | **PASS** — all 6 packages ok |
+| Migration chains | `make validate-migrations` | **PASS** — `migration validation: OK (10 domains, 12 migrations)` |
+
+`go test ./...` per package (standard / `-race`): `backend/dispatch` ok 0.028s / 1.173s · `backend/identity` ok 11.059s / 21.690s · `backend/jobs` ok 0.047s / 1.111s · `backend/platform` ok 0.011s / 1.081s · `backend/platform/pgtest` ok 0.038s / 1.098s · `backend/vehicles` ok 0.015s / 1.101s · migrations chains and all `cmd/*`: no test files. Test inventory grew **153 → 183** top-level test functions (dispatch 28, identity 41, jobs 43, platform 28, vehicles 42, pgtest 1), counted with `grep -h "^func Test" … | wc -l`.
+
+**Web (`apps/customer`)** — Node v24.19.0, npm 11.17.0:
+
+| Gate | Command | Result |
+|---|---|---|
+| Install | `npm ci` | **PASS** — exit 0, `found 0 vulnerabilities`; npm allow-scripts notes for `esbuild@0.28.2` / `unrs-resolver@1.12.2` postinstalls (sandbox npm policy, informational) |
+| Lint | `npm run lint` | **PASS** — no findings |
+| Tests | `npm test` | **PASS** — **4 files, 17/17** in 3.32s (landing 4, dashboard-shell 4, login-form 4, vehicle-list 5) |
+| Build | `npm run build` | **PASS** — exit 0, "Generating static pages (7/7)" |
+
+Routes (verbatim from build): `/` ○ · `/_not-found` ○ · `/dashboard` ○ · `/dashboard/vehicles` ○ · `/dashboard/vehicles/[vehicleId]` ƒ · `/login` ○ — same 5 routes as Round 1, now with `/dashboard/vehicles` doing runtime data fetching against the listing endpoint.
+
+**Mobile (`apps/technician`)**:
+
+| Gate | Command | Result |
+|---|---|---|
+| Install | `npm ci` | **PASS** — exit 0, added 492 packages. **10 moderate-severity `npm audit` findings, all in the Expo SDK toolchain** (`@expo/config`, `@expo/config-plugins`, `@expo/prebuild-config`, `@expo/metro-config`, `@expo/inline-modules`) + 1 open repo Dependabot alert: `uuid` < 11.1.1, medium, GHSA-w5hq-g745-h8pq (R2.5) |
+| Typecheck | `npx tsc --noEmit` | **PASS** — exit 0 |
+| Tests | `npx vitest run` | **PASS** — **4 files, 28/28** in 0.635s (job-state.guards 11, outbox.backoff 7, outbox.idempotency 6, sync.happy-path 4) |
+
+**Not executable here (unchanged from Round 1):** Docker/psql absent → no image build, `stack-up`, or seed run; GitHub Actions billing-locked (#10) → CI execution impossible. Additionally, the PG-gated integration suite and NATS e2e **compile and skip cleanly** but did not execute: no `TEST_DATABASE_URL`/`TEST_NATS_URL` in this sandbox.
+
+### R2.3 Contracts 1:1 re-check
+
+Operation counts extracted from `contracts/*/openapi.yaml` vs `r.Get/r.Post` registrations in `backend/*/http.go` (grep outputs recorded this session):
+
+| Domain | Documented operations | Registered routes | Match |
+|---|---|---|---|
+| identity | 6 | 6 (`http.go:110–115`) | **6/6** |
+| vehicles | **6** — incl. **new `GET /v1/vehicles`** (contract line ~20 block) alongside POST, `{vehicleID}` GET/passport/history, mileage POST | 6 (`http.go:40–46` under `r.Route("/v1/vehicles")`, incl. `r.Get("/", …handleListVehicles)`) | **6/6** — Round-1 gap closed in contract **and** code |
+| jobs | 8 | 8 (`http.go:59–71`) | **8/8** |
+| dispatch | 2 | 2 (`http.go:46–47`) | **2/2** |
+| **Total** | **22** | **22** | **22/22** |
+
+Cross-layer check: `apps/customer/src/lib/api/vehicles.ts` `VEHICLE_ENDPOINTS.list = "GET /v1/vehicles"` with `listVehicles()` returning `VehicleList` typed against the contract — the web client consumes the same 6-operation surface.
+
+### R2.4 Tenant isolation + events verification
+
+All 16 isolation/scoping tests named below were run individually with `go test -v -count=1 -run '…'` this session — **16/16 PASS**:
+
+- **identity** (`scoping_test.go`): `TestCrossPrincipalProfileReadsAreSelfScoped`, `TestAdminUserListingIsOperatorSurface`, `TestSessionReadsArePossessionScoped` — PASS
+- **jobs** (`scoping_test.go`): `TestCrossTenantJobReadsDenied`, `TestCrossTenantStoreReadsDenied`, `TestOperatorSeesAcrossTenantsByDesign` — PASS
+- **dispatch** (`scoping_test.go`): `TestDispatchReadsAreOperatorOnly`, `TestStatelessScoringLeaksNothingAcrossPrincipals` — PASS
+- **vehicles** (`http_test.go`): `TestListVehiclesEndpoint`, `TestListVehiclesPersonalScope`, `TestListVehiclesTenantIsolation`, `TestListVehiclesCursorPagination`, `TestListVehiclesRequiresAuth`, `TestListVehiclesInvalidParams`, `TestScopeFromClaims`, `TestRecordMileageForbiddenForOtherCustomer` — PASS
+
+SQL-level counterparts exist but are gated: `TestJobStoreScopeIsolationIntegration` and `TestListVehiclesKeysetIntegration` ran in this session's `-run 'Integration|Postgres|E2E'` pass and **SKIP cleanly** with `TEST_DATABASE_URL` unset (with `TestPostgresStoreFullFlow`, `TestPostgresStoreUserCRUDRoleGrantsAndSessions`, `TestJobLifecycleIntegration`, `TestVehiclePassportLifecycleIntegration`) — **6 PG-gated integration tests, compile + skip verified, not executed here**. The harness self-test `TestPoolSkipsCleanlyWithoutDatabase` passes and prints the runbook message verbatim: *"TEST_DATABASE_URL is not set; skipping Postgres integration test — start the dev stack with `make dev`, then export TEST_DATABASE_URL='postgres://motivra:motivra@localhost:5432/motivra?sslmode=disable' (see docs/RUNBOOK.md)"*. The NATS e2e (`TestNATSPublisherEndToEnd`) likewise SKIPs with its documented message when `TEST_NATS_URL` is unset. **Not executable here:** no Postgres/NATS/Docker in this sandbox; CI execution blocked by #10.
+
+Event surface verified in code: publishers wired in `cmd/identity|jobs|vehicles/main.go` (constructed only when `MOTIVRA_NATS_URL` set, nil otherwise); topics follow ADR-0002 (`motivra.identity.{user.created,role.granted}.v1`, `motivra.jobs.{request.received,job.created,job.status.changed,job.assigned}.v1`, `motivra.vehicles.{vehicle.created,vehicle.history.updated,vehicle.mileage.recorded}.v1`).
+
+### R2.5 Security posture delta (vs Round 1)
+
+| Check | Command / method | Result |
+|---|---|---|
+| Secrets scan | `grep -rEI 'ghp_…\|gho_…\|AKIA…\|-----BEGIN (RSA\|EC) PRIVATE KEY' . --exclude-dir=node_modules --exclude-dir=.git` | **zero hits** (exit 1) — unchanged from Round 1, incl. all PR #43–#49 additions |
+| `.env` hygiene | `.gitignore` lines 14–16 + `git check-ignore` against a freshly touched `.env` | `.env` and `.env.*` ignored (verified live), `!.env.example` exception intact |
+| Auth primitives | code inspection | **intact after PR #49 rewiring**: argon2id (m=64 MiB, t=3, p=4) + `MinPasswordLength=10` (`backend/identity/password.go:20–25`); HS256 allowlist (`backend/platform/jwt.go:52`); refresh tokens as HMAC-SHA256 digests (`backend/identity/tokens.go:235`) |
+| Event payload hygiene | enumerated every `Payload struct` + grep for secret-shaped JSON tags | Payload structs (identity `UserCreatedPayload`/`RoleGrantedPayload`, jobs 4 payload types, vehicles map payloads of ids/vin/make/model/year/plate) contain **no password/secret/token/credential fields** (zero grep hits); identity payload comment states "never credential material" |
+| Dependabot alerts | repo API `…/dependabot/alerts?state=open` | **1 open** (was 4): `uuid` < 11.1.1, **medium** (GHSA-w5hq-g745-h8pq), `apps/technician/package-lock.json`, fixed in 11.1.1 — transitive Expo-toolchain dep; Round-1's 4 postcss alerts closed by merged #36 |
+
+Known, honestly-documented deltas: (a) `vehicle.history.updated.v1` cannot yet carry `tenant_id` (code comment in `backend/vehicles/service.go`, follow-up noted under #28); (b) the mobile toolchain carries the `uuid` medium alert above; (c) web auth is still the interim `localStorage` token source with a documented login-integration follow-up — 401 states render honestly, no fake data.
+
+### R2.6 Documentation & governance re-check
+
+- Round-1 QA report content **intact** above (append-only respected; verified via `git diff` — additions only).
+- ADRs `0001`–`0006` all present under `docs/adr/`.
+- `docs/engineering/agents.md` contains the **Integration Window 2 (completed)** summary (line 62). **Integration Window 3 summary is absent** — noted as pending the coordinator's separate sync PR (governance drift is expected until it lands).
+- **Defect found (reported, not fixed — outside this QA zone):** `docs/RUNBOOK.md` contains **no** `TEST_DATABASE_URL`, `TEST_NATS_URL`, `pgtest`, or integration-suite instructions, while `backend/platform/pgtest/pgtest.go` (lines 13, 46) and `backend/platform/events_nats_test.go` (lines 25, 30) both point readers to "docs/RUNBOOK.md" for the local path. The skip messages are self-contained (full commands inline), so nothing is operationally lost, but the doc pointer dangles and the PR-#49 intent ("RUNBOOK how-to-run") is only partially realized. RUNBOOK §7 *does* correctly document the `MOTIVRA_NATS_URL` publisher wiring + nil-publisher behavior.
+
+### R2.7 Updated readiness verdict
+
+**What improved since Round 1 (all verified this session, not taken on faith):**
+1. **Tenant isolation is enforced and tested** — reads in identity/jobs/vehicles now scope on validated claims (404-not-403 per ADR-0004), 16 named isolation tests green incl. `-race`, plus SQL-level gated counterparts. Round-1 risk #3 is substantially retired.
+2. **Events flow** — identity/jobs/vehicles publish ADR-0002 envelope events when `MOTIVRA_NATS_URL` is set; Round-1 deferral closed (#28 closed).
+3. **Listing gap closed** — `GET /v1/vehicles` exists in contract, backend (scoped, keyset-paginated), and web client; contracts now 22/22.
+4. **Mobile foundation exists** — 28 green vitest for outbox/sync/state-guards, typecheck clean; #29 closed for its foundation scope.
+5. **Test mass** grew 153 → 183 backend test functions and 12 → 17 web tests, all green.
+6. Deployment artifacts (Dockerfile/compose/seed) unchanged from Round 1 — still static-validation only.
+
+**Still gating customer onboarding (unchanged or new):**
+- **CI as merge gate** — Actions billing lock #10 (owner action) remains the top blocker; ruleset still cannot require checks.
+- **Runtime data plane** — managed Postgres/PostGIS, secrets management, domain, TLS: untracked ops work; zero runtime deployment evidence (Docker absent here).
+- **Real auth in web** — `localStorage` interim token; login integration is the next web PR.
+- **Mobile real-world readiness** — in-memory storage only (no SQLite), stubbed transport, no native/EAS build evidence (no Android/iOS toolchain here), pull targets a not-yet-existing `GET /v1/jobs/sync?cursor=` contract.
+- **Payments Wave 5** — no `backend/payments` code; revenue narrative remains unsupported.
+- **Gated suites unexecuted** — 6 PG integration tests + 1 NATS e2e compile+skip only; first real-database run still owed (CI once #10 lifts, or a Docker-capable machine via RUNBOOK).
+- **New minor risks** — technician `uuid` medium alert (Expo toolchain); RUNBOOK pointer gap (R2.6); Window-3 governance sync pending.
+
+**Verdict:** the engineering posture is materially stronger than Round 1 — hardening (#28) and mobile foundation (#29) closed, contracts 22/22, all local gates green on a fresh clone. **Motivra is still NOT production-ready**, and the same plain statement applies: nothing here should be represented to investors, users, or recruiters as deployed or revenue-generating. The critical path to production is unchanged: #10 → CI-as-gate → runtime deployment evidence → managed infra → payments.
+
+### R2.8 Recommended next five actions
+
+1. **Owner: resolve #10 (billing lock)**, land a trivial proving PR, then upgrade ruleset `main-branch-protection` (id 22533278) to require Lint/Test/Migration-validation — identical to Round-1 action #1 because it remains unblocked-everything-else.
+2. **First execution of the gated suites**: once CI runs (or on any Docker-capable machine), export `TEST_DATABASE_URL`/`TEST_NATS_URL` per the skip messages and paste the 6+1 integration results into a tracked follow-up — this converts "compile + skip verified" into real-database evidence.
+3. **Fix the RUNBOOK pointer gap (R2.6)**: add a short "§2a — running integration tests" with `TEST_DATABASE_URL`/`TEST_NATS_URL` and the `pgtest` harness, so the code's "see docs/RUNBOOK.md" references resolve.
+4. **Web login integration**: replace the interim `localStorage` token source with the real identity flow (register/login/refresh already contract-complete 6/6), keeping the existing 401-honest error states.
+5. **Bump `uuid` ≥ 11.1.1 in `apps/technician`** (clears the last open Dependabot alert) and, with it, file the coordinator's Window-3 governance sync (agents.md summary + any status drift).
+
+### R2.9 Sign-off
+
+| Field | Value |
+|---|---|
+| QA agent | qa-02 (Task ID 8-5, Motivra autonomous engineering org) |
+| Verification commit | `6732f5ac6461c90e8a6bd9757f718e1405aa36e6` (fresh clone of `main`, 2026-09-09) |
+| Report branch | `agent/qa/round2` |
+| Date | 2026-09-09 (UTC) |
+| Backend verdict | **GREEN** (gofmt / vet / build / 183 test funcs incl. `-race` / migrations) — gated suites compile + skip, not executed |
+| Web verdict | **GREEN** (lint / 17 of 17 / build, 5 routes) |
+| Mobile verdict | **GREEN at its scope** (tsc / 28 of 28) — logic-level only, no native build evidence |
+| Contracts verdict | **GREEN** — 22/22 documented = implemented; Round-1 vehicles-listing gap closed |
+| Security verdict | **PASS** — zero secret-scan hits, auth primitives intact, 1 medium toolchain alert (`uuid`, apps/technician) |
+| Deployment verdict | **STATIC-VALIDATION ONLY** (unchanged) — no Docker in sandbox |
+| Overall verdict | **Post-hardening foundation verified green locally and materially improved; NOT production-ready.** Gated by #10 (CI), runtime deployment evidence, managed infra, web real auth, mobile real storage/transport, Wave 5 payments. |
+
+*Round 2 contains no vanity claims. Every gate result above was produced by a command executed against the verification commit during this session; sandbox-impossible checks are labeled as such. Round-1 text above is preserved verbatim.*
