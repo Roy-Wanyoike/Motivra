@@ -124,9 +124,10 @@ func (s *Service) CreateRequest(ctx context.Context, r *ServiceRequest) error {
 // CreateJobFromRequest converts a service request in status 'received' into
 // a job in status CREATED, marks the request 'converted', and publishes
 // job.created.v1. Calling it twice for the same request fails with an error
-// wrapping ErrAlreadyConverted.
-func (s *Service) CreateJobFromRequest(ctx context.Context, requestID uuid.UUID) (Job, error) {
-	request, err := s.store.GetRequest(ctx, requestID)
+// wrapping ErrAlreadyConverted. The request is read through scope, so a
+// caller who cannot see the request cannot convert it either.
+func (s *Service) CreateJobFromRequest(ctx context.Context, requestID uuid.UUID, scope ReadScope) (Job, error) {
+	request, err := s.store.GetRequest(ctx, requestID, scope)
 	if err != nil {
 		return Job{}, fmt.Errorf("jobs: create job from request: %w", err)
 	}
@@ -164,9 +165,10 @@ func (s *Service) CreateJobFromRequest(ctx context.Context, requestID uuid.UUID)
 // Transition moves the job to the requested status through the state
 // machine, persists the move with its audit row, and publishes
 // job.status.changed.v1 with from/to/reason. Illegal moves are rejected
-// with an error wrapping ErrConflict and publish nothing.
-func (s *Service) Transition(ctx context.Context, jobID uuid.UUID, to Status, actorID *uuid.UUID, reason string) error {
-	job, err := s.store.GetJob(ctx, jobID)
+// with an error wrapping ErrConflict and publish nothing. The job is read
+// through scope; invisible jobs are indistinguishable from missing ones.
+func (s *Service) Transition(ctx context.Context, jobID uuid.UUID, to Status, actorID *uuid.UUID, reason string, scope ReadScope) error {
+	job, err := s.store.GetJob(ctx, jobID, scope)
 	if err != nil {
 		return fmt.Errorf("jobs: transition job: %w", err)
 	}
@@ -192,8 +194,8 @@ func (s *Service) Transition(ctx context.Context, jobID uuid.UUID, to Status, ac
 // through the legal reassignment edge (ASSIGNED -> DISPATCHING), then
 // assigning. Every other current status is rejected with the state
 // machine's conflict error.
-func (s *Service) AssignTechnician(ctx context.Context, jobID uuid.UUID, technicianID uuid.UUID, assignedBy *uuid.UUID) error {
-	job, err := s.store.GetJob(ctx, jobID)
+func (s *Service) AssignTechnician(ctx context.Context, jobID uuid.UUID, technicianID uuid.UUID, assignedBy *uuid.UUID, scope ReadScope) error {
+	job, err := s.store.GetJob(ctx, jobID, scope)
 	if err != nil {
 		return fmt.Errorf("jobs: assign technician: %w", err)
 	}
@@ -208,7 +210,7 @@ func (s *Service) AssignTechnician(ctx context.Context, jobID uuid.UUID, technic
 		// Reassignment discipline: back to DISPATCHING first. The edge is
 		// guaranteed legal (ASSIGNED -> DISPATCHING) and persists its own
 		// audit row and status.changed event.
-		if err := s.Transition(ctx, jobID, StatusDispatching, assignedBy, "reassignment"); err != nil {
+		if err := s.Transition(ctx, jobID, StatusDispatching, assignedBy, "reassignment", scope); err != nil {
 			return err
 		}
 	default:
@@ -229,9 +231,11 @@ func (s *Service) AssignTechnician(ctx context.Context, jobID uuid.UUID, technic
 }
 
 // Accept records technicianID accepting the job's assignment: the job moves
-// ASSIGNED -> ACCEPTED and job.status.changed.v1 is published.
-func (s *Service) Accept(ctx context.Context, jobID uuid.UUID, technicianID uuid.UUID) error {
-	job, err := s.store.GetJob(ctx, jobID)
+// ASSIGNED -> ACCEPTED and job.status.changed.v1 is published. The job is
+// read through the accepting technician's own scope, so technicians cannot
+// probe jobs they are not assigned to.
+func (s *Service) Accept(ctx context.Context, jobID uuid.UUID, technicianID uuid.UUID, scope ReadScope) error {
+	job, err := s.store.GetJob(ctx, jobID, scope)
 	if err != nil {
 		return fmt.Errorf("jobs: accept assignment: %w", err)
 	}
@@ -255,21 +259,24 @@ func (s *Service) Accept(ctx context.Context, jobID uuid.UUID, technicianID uuid
 	})
 }
 
-// GetJob returns the job with the given id, or an error wrapping
-// ErrJobNotFound when it does not exist. Read path for the HTTP layer.
-func (s *Service) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
-	return s.store.GetJob(ctx, id)
+// GetJob returns the job with the given id when visible to scope, or an
+// error wrapping ErrJobNotFound otherwise. Read path for the HTTP layer;
+// scope always comes from the authenticated principal.
+func (s *Service) GetJob(ctx context.Context, id uuid.UUID, scope ReadScope) (Job, error) {
+	return s.store.GetJob(ctx, id, scope)
 }
 
 // Transitions returns the job's append-only transition audit trail in
-// chronological order (oldest first). Read path for the HTTP layer.
-func (s *Service) Transitions(ctx context.Context, jobID uuid.UUID) ([]JobTransition, error) {
-	return s.store.ListTransitions(ctx, jobID)
+// chronological order (oldest first), limited to what scope can see.
+// Read path for the HTTP layer.
+func (s *Service) Transitions(ctx context.Context, jobID uuid.UUID, scope ReadScope) ([]JobTransition, error) {
+	return s.store.ListTransitions(ctx, jobID, scope)
 }
 
 // JobsByStatus lists jobs in the given status, newest first, with the
-// service's pagination discipline (defaults and caps).
-func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset int) ([]Job, error) {
+// service's pagination discipline (defaults and caps), limited to what
+// scope can see.
+func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
 	if !isKnownStatus(status) {
 		return nil, fmt.Errorf("jobs: list jobs by status: unknown status %q", status)
 	}
@@ -282,7 +289,7 @@ func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset
 	if offset < 0 {
 		offset = 0
 	}
-	jobs, err := s.store.ListJobsByStatus(ctx, status, limit, offset)
+	jobs, err := s.store.ListJobsByStatus(ctx, status, limit, offset, scope)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: list jobs by status: %w", err)
 	}

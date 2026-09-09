@@ -169,7 +169,7 @@ func TestCreateJobFromRequestEndpoint(t *testing.T) {
 	assert.Equal(t, requestID, job["service_request_id"])
 	assert.Equal(t, req["description"], job["problem_summary"])
 
-	stored, err := store.GetRequest(context.Background(), mustUUID(t, requestID))
+	stored, err := store.GetRequest(context.Background(), mustUUID(t, requestID), opScope())
 	require.NoError(t, err)
 	assert.Equal(t, RequestStatusConverted, stored.Status)
 
@@ -193,7 +193,7 @@ func TestTransitionByDispatcher(t *testing.T) {
 	assert.Equal(t, string(StatusTriaging), got["status"])
 	assert.Equal(t, job.ID.String(), got["id"])
 
-	stored, err := svc.GetJob(context.Background(), job.ID)
+	stored, err := svc.GetJob(context.Background(), job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusTriaging, stored.Status)
 }
@@ -210,7 +210,7 @@ func TestIllegalTransitionConflicts(t *testing.T) {
 	assert.Equal(t, "conflict", decodeBody(t, w)["code"])
 	assert.Zero(t, pub.count(), "rejected transitions must publish nothing")
 
-	stored, err := store.GetJob(context.Background(), job.ID)
+	stored, err := store.GetJob(context.Background(), job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusCreated, stored.Status, "rejected transition must not mutate")
 }
@@ -271,7 +271,7 @@ func TestAssignAndAcceptFlow(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, w.Code)
 	assert.Empty(t, w.Body.String())
 
-	stored, err := svc.GetJob(context.Background(), job.ID)
+	stored, err := svc.GetJob(context.Background(), job.ID, opScope())
 	require.NoError(t, err)
 	assert.Equal(t, StatusAccepted, stored.Status)
 
@@ -286,9 +286,10 @@ func TestAssignAndAcceptFlow(t *testing.T) {
 	}
 	assert.True(t, acceptedEvent, "acceptance must publish status.changed")
 
-	// A different technician cannot accept.
+	// A different technician cannot accept; the scoped read makes a foreign
+	// job indistinguishable from a missing one (404, no existence leak).
 	w = do(t, h, http.MethodPost, "/v1/jobs/"+job.ID.String()+"/accept", mintToken(t, uuid.New().String(), RoleTechnician), nil)
-	require.Equal(t, http.StatusConflict, w.Code)
+	require.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestAssignForbiddenForTechnician(t *testing.T) {
@@ -312,7 +313,7 @@ func TestAcceptRequiresTechnicianRole(t *testing.T) {
 	job := jobInStore(t, store, StatusCreated)
 	driveDispatching(t, svc, job.ID)
 	tech := uuid.New()
-	require.NoError(t, svc.AssignTechnician(context.Background(), job.ID, tech, nil))
+	require.NoError(t, svc.AssignTechnician(context.Background(), job.ID, tech, nil, opScope()))
 
 	// A dispatcher cannot accept on behalf of the technician.
 	w := do(t, h, http.MethodPost, "/v1/jobs/"+job.ID.String()+"/accept", dispatcher, nil)
@@ -325,7 +326,7 @@ func TestTransitionAuditTrail(t *testing.T) {
 	dispatcher, dispatcherID := tokenFor(t, RoleDispatcher)
 
 	job := jobInStore(t, store, StatusCreated)
-	require.NoError(t, svc.Transition(context.Background(), job.ID, StatusTriaging, &dispatcherID, "triaged"))
+	require.NoError(t, svc.Transition(context.Background(), job.ID, StatusTriaging, &dispatcherID, "triaged", opScope()))
 
 	w := do(t, h, http.MethodGet, "/v1/jobs/"+job.ID.String()+"/transitions", dispatcher, nil)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -342,9 +343,11 @@ func TestTransitionAuditTrail(t *testing.T) {
 func TestGetJobEndpoint(t *testing.T) {
 	t.Parallel()
 	h, store, _, _ := newTestAPI(t)
-	token, _ := tokenFor(t, RoleCustomer)
 
 	job := jobInStore(t, store, StatusCreated)
+	// The customer token's subject is the job's owner: reads are scoped to
+	// the authenticated principal, so owners see their own jobs.
+	token := mintToken(t, job.CustomerID.String(), RoleCustomer)
 
 	w := do(t, h, http.MethodGet, "/v1/jobs/"+job.ID.String(), token, nil)
 	require.Equal(t, http.StatusOK, w.Code)
