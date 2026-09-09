@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Motivra Tech",
+    "slug": "motivra-tech",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "motivratech",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.motivra.tech"
+    },
+    "android": {
+      "package": "com.motivra.tech",
+      "edgeToEdgeEnabled": true
+    },
+    "newArchEnabled": true
+  }
+}
