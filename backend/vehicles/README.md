@@ -64,8 +64,10 @@ persisted; only the normalized form is stored in `vin_normalized`.
 
 ## Events (ADR-0002)
 
-Published via `platform.Publisher` on subject `motivra.vehicles.<event_type>`
-(the publisher may be nil — wiring lands with the notifications wave):
+Published via `platform.Publisher` on subject `motivra.vehicles.<event_type>`.
+`cmd/vehicles` constructs a `platform.NATSPublisher` when `MOTIVRA_NATS_URL`
+is set (issue #28, deferral 2); while the variable is unset the service runs
+with a nil publisher and skips publishing:
 
 | Event | When | Payload highlights |
 |---|---|---|

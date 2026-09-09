@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/Roy-Wanyoike/Motivra/backend/platform"
@@ -113,7 +114,7 @@ func (s *Service) CreateRequest(ctx context.Context, r *ServiceRequest) error {
 		return fmt.Errorf("jobs: create request: %w", err)
 	}
 
-	return s.publish(ctx, EventRequestReceived, r.ID, RequestReceivedPayload{
+	return s.publish(ctx, EventRequestReceived, r.ID, &r.CustomerID, RequestReceivedPayload{
 		RequestID:   r.ID,
 		CustomerID:  r.CustomerID,
 		VehicleID:   r.VehicleID,
@@ -150,7 +151,7 @@ func (s *Service) CreateJobFromRequest(ctx context.Context, requestID uuid.UUID,
 		return Job{}, fmt.Errorf("jobs: create job from request: %w", err)
 	}
 
-	if err := s.publish(ctx, EventJobCreated, job.ID, JobCreatedPayload{
+	if err := s.publish(ctx, EventJobCreated, job.ID, &scope.ViewerID, JobCreatedPayload{
 		JobID:            job.ID,
 		ServiceRequestID: job.ServiceRequestID,
 		CustomerID:       job.CustomerID,
@@ -179,7 +180,7 @@ func (s *Service) Transition(ctx context.Context, jobID uuid.UUID, to Status, ac
 		return fmt.Errorf("jobs: transition job: %w", err)
 	}
 
-	return s.publish(ctx, EventJobStatusChanged, jobID, JobStatusChangedPayload{
+	return s.publish(ctx, EventJobStatusChanged, jobID, actorID, JobStatusChangedPayload{
 		JobID:   jobID,
 		From:    job.Status,
 		To:      to,
@@ -223,7 +224,7 @@ func (s *Service) AssignTechnician(ctx context.Context, jobID uuid.UUID, technic
 		return fmt.Errorf("jobs: assign technician: %w", err)
 	}
 
-	return s.publish(ctx, EventJobAssigned, jobID, JobAssignedPayload{
+	return s.publish(ctx, EventJobAssigned, jobID, assignedBy, JobAssignedPayload{
 		JobID:        jobID,
 		TechnicianID: technicianID,
 		AssignedBy:   assignedBy,
@@ -250,7 +251,7 @@ func (s *Service) Accept(ctx context.Context, jobID uuid.UUID, technicianID uuid
 		return fmt.Errorf("jobs: accept assignment: %w", err)
 	}
 
-	return s.publish(ctx, EventJobStatusChanged, jobID, JobStatusChangedPayload{
+	return s.publish(ctx, EventJobStatusChanged, jobID, &technicianID, JobStatusChangedPayload{
 		JobID:   jobID,
 		From:    job.Status,
 		To:      StatusAccepted,
@@ -296,14 +297,30 @@ func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset
 	return jobs, nil
 }
 
+// correlationFromContext sources the event correlation_id from the
+// platform server's request-ID middleware (ADR-0002: correlation is
+// propagated from the originating request). It is empty for non-HTTP
+// callers; when Temporal workflows drive a job's lifetime, the workflow id
+// becomes the stable correlation source.
+func correlationFromContext(ctx context.Context) string {
+	return middleware.GetReqID(ctx)
+}
+
 // publish sends one domain event on the jobs domain. It is a no-op when no
 // publisher is configured. Publishing failures surface to the caller:
-// events are part of the domain contract, not best-effort logging.
-func (s *Service) publish(ctx context.Context, eventType string, aggregateID uuid.UUID, payload any) error {
+// events are part of the domain contract, not best-effort logging. The
+// envelope carries the acting principal (empty for system actors) and the
+// request correlation id; tenant_id stays empty until the jobs tables
+// carry tenant_id (documented in #28: data-model milestone).
+func (s *Service) publish(ctx context.Context, eventType string, aggregateID uuid.UUID, actorID *uuid.UUID, payload any) error {
 	if s.publisher == nil {
 		return nil
 	}
-	e, err := platform.NewEvent(eventType, aggregateID.String(), "", "", "", payload)
+	actor := ""
+	if actorID != nil && *actorID != uuid.Nil {
+		actor = actorID.String()
+	}
+	e, err := platform.NewEvent(eventType, aggregateID.String(), "", actor, correlationFromContext(ctx), payload)
 	if err != nil {
 		return fmt.Errorf("jobs: build %s event: %w", eventType, err)
 	}

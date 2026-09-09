@@ -16,6 +16,7 @@ const (
 	ActionUserLogin        = "identity.user.login"
 	ActionSessionRefreshed = "identity.session.refreshed"
 	ActionSessionRevoked   = "identity.session.revoked"
+	ActionRoleGranted      = "identity.role.granted"
 )
 
 // AuditEntry is one append-only audit record (ADR-0003 append-only rules,

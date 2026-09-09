@@ -191,8 +191,12 @@ Be honest with stakeholders about what this runbook does **not** cover yet:
 - **Temporal is out of the app stack** — dev profile only
   (`make dev-temporal`); no service currently dials Temporal in production
   topology.
-- **Redis/NATS env vars are wired but idle** — services start with nil
-  publishers; event publishing lands with the notifications wave.
+- **Redis env var is wired but idle** — no service consumes Redis yet.
+  NATS event publishing is wired (issue #28): identity/jobs/vehicles build a
+  JetStream publisher when `MOTIVRA_NATS_URL` is set and publish
+  `motivra.<domain>.<aggregate>.<event>.v1` envelopes per ADR-0002; with the
+  variable unset they run with a nil publisher. No domain consumes events yet
+  (consumers land with the notifications wave).
 - **One shared database in the stack** — services run per-domain migration
   chains in one Postgres database; per-domain DB roles/isolation (ADR-0003
   "own database role") are not yet provisioned.

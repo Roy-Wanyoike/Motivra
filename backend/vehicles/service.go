@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/Roy-Wanyoike/Motivra/backend/platform"
@@ -269,9 +270,22 @@ func (s *Service) RecordMileage(ctx context.Context, vehicleID uuid.UUID, km int
 	})
 }
 
+// correlationFromContext sources the event correlation_id from the
+// platform server's request-ID middleware (ADR-0002: correlation is
+// propagated from the originating request). It is empty for non-HTTP
+// callers.
+func correlationFromContext(ctx context.Context) string {
+	return middleware.GetReqID(ctx)
+}
+
 // publish builds the envelope with platform.NewEvent and hands it to the
 // publisher. It is a no-op when no publisher is configured. The event
-// envelope carries tenantID and actorID (empty strings when unset).
+// envelope carries tenantID and actorID (empty strings when unset) plus
+// the request correlation id. causation_id stays null for these
+// request-initiated events (ADR-0002: "null for initiators"). Note
+// (follow-up in #28): vehicle.history.updated.v1 cannot carry the tenant
+// yet because the history write path does not resolve the vehicle row's
+// tenant_id; filling it needs a store capability, not a semantics change.
 func (s *Service) publish(ctx context.Context, eventType string, aggregateID uuid.UUID, tenantID, actorID *uuid.UUID, payload map[string]any) error {
 	if s.publisher == nil {
 		return nil
@@ -284,7 +298,7 @@ func (s *Service) publish(ctx context.Context, eventType string, aggregateID uui
 	if actorID != nil && *actorID != uuid.Nil {
 		actor = actorID.String()
 	}
-	e, err := platform.NewEvent(eventType, aggregateID.String(), tenant, actor, "", payload)
+	e, err := platform.NewEvent(eventType, aggregateID.String(), tenant, actor, correlationFromContext(ctx), payload)
 	if err != nil {
 		return fmt.Errorf("vehicles: build %s event: %w", eventType, err)
 	}

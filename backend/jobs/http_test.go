@@ -117,7 +117,8 @@ func TestCreateRequestEndpoint(t *testing.T) {
 
 	events := pub.ofType(t, EventRequestReceived)
 	require.Len(t, events, 1)
-	assert.Equal(t, "jobs", events[0].CorrelationID)
+	assert.Equal(t, EventDomain, pub.domainOf(t, 0), "publish domain must be jobs")
+	assert.Equal(t, "", events[0].CorrelationID, "non-HTTP callers publish an empty correlation_id")
 }
 
 func TestCreateRequestValidationFailures(t *testing.T) {
