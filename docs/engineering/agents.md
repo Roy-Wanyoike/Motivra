@@ -13,17 +13,17 @@ Each agent claims an issue by posting a claim comment on it (agent name, branch,
 | A01 Principal Architect | `docs/adr/`, `docs/engineering/`, `docs/ARCHITECTURE.md` | Foundational ADRs (0001–0005), agent registry, architecture overview maintenance, cross-context boundary rulings | MERGED — PR #8 |
 | A02 Product Manager | `docs/ROADMAP.md`, `docs/IDEAS.md`, issue taxonomy | Wave sequencing, issue definitions, prioritization, definition of done, metric targets | MERGED — PR #1; issues #2–#7, #24–#31, #38 |
 | A03 Product Designer | `/apps` shared design system, UX specs in `docs/design/` | Motivra design system, product flows, accessibility standards, UI review bar | FOUNDATION MERGED — PR #35 (design tokens + a11y bar in apps/customer); design-system docs pending |
-| A04 Platform Foundation | `/backend/platform` | Config, HTTP server construct, middleware, pgx/sqlc data layer, Redis/NATS/Temporal wiring, health endpoints, service template | MERGED — PRs #14, #15 |
-| A05 Identity & Security | `/backend/identity` | AuthN (JWT + refresh sessions), RBAC matrix, tenant isolation, device management, audit foundations | MERGED — PR #16 |
-| A06 Vehicle Identity | `/backend/vehicles` (registry, VIN) | Canonical vehicle identity, VIN resolution, component registry | MERGED — PR #17 |
-| A07 Vehicle Registry & History | `/backend/vehicles` (history) | Append-only service history, mileage records, corrections-as-new-records semantics | MERGED — PR #17 |
-| A08 Vehicle Passport | `/backend/vehicles` (passport read model) | Passport assembly from history, provenance display, verified report surfacing | MERGED — PR #17 |
+| A04 Platform Foundation | `/backend/platform` | Config, HTTP server construct, middleware, pgx/sqlc data layer, Redis/NATS/Temporal wiring, health endpoints, service template | MERGED — PRs #14, #15; events/pgtest harness — PR #49 |
+| A05 Identity & Security | `/backend/identity` | AuthN (JWT + refresh sessions), RBAC matrix, tenant isolation, device management, audit foundations | MERGED — PR #16; tenant-scoping isolation tests — PR #47 |
+| A06 Vehicle Identity | `/backend/vehicles` (registry, VIN) | Canonical vehicle identity, VIN resolution, component registry | MERGED — PRs #17, #46 (scoped listing) |
+| A07 Vehicle Registry & History | `/backend/vehicles` (history) | Append-only service history, mileage records, corrections-as-new-records semantics | MERGED — PRs #17, #47 (scope isolation) |
+| A08 Vehicle Passport | `/backend/vehicles` (passport read model) | Passport assembly from history, provenance display, verified report surfacing | MERGED — PR #17; events wired — PR #49 |
 | A09 Inspection Platform | `/backend/inspections` (templates, findings) | Dynamic inspection templates, severity model (GREEN/AMBER/RED), inspection state machine | PLANNED |
 | A10 Evidence Platform | `/backend/inspections` (evidence, media) | Evidence capture, provenance records, S3 media handling, verified report generation | PLANNED |
 | A11 Service Platform | `/backend/jobs` | Service requests, job state machine, assignments, escalation triggers | MERGED — PR #21 |
 | A12 Dispatch | `/backend/dispatch` | Explainable dispatch scoring (fit, distance, equipment, performance), availability, service areas | MERGED — PR #20 |
 | A13 Technician | `/backend/dispatch` (technician profiles, quality), technician domain events | Technician verification, skills, quality scoring, earnings surface | PLANNED |
-| A14 Mobile/Offline | `/apps/technician` | Offline-first field app: local DB, outbox, sync queue, conflict resolution, resumable uploads | TRACKED — issue #29 |
+| A14 Mobile/Offline | `/apps/technician` | Offline-first field app: local DB, outbox, sync queue, conflict resolution, resumable uploads | FOUNDATION MERGED — PR #43 (outbox/sync/guards, 28 tests); SQLite persistence + real transport pending |
 | A15 Garage | `/backend/garages` | Garage onboarding, verification, capacity, appointments, mobile-to-garage escalation | PLANNED |
 | A16 Parts | `/backend/parts` | Parts catalog, OEM/aftermarket compatibility, inventory, reservations, supplier orders | PLANNED |
 | A17 Payments | `/backend/payments` | Provider abstraction, M-Pesa first, integer-minor-unit ledger, webhooks, reconciliation, refunds | PLANNED |
@@ -33,11 +33,11 @@ Each agent claims an issue by posting a claim comment on it (agent name, branch,
 | A21 AI/ML | `/backend/ai` | AI triage, technician copilot, predictive maintenance — advisory outputs only (prediction, confidence, source, verification state) | PLANNED |
 | A22 Data Engineering | `/backend/analytics`, ClickHouse projections | Event-consumption pipelines, analytics projections, unit-economics and investor metrics layers | PLANNED |
 | A23 Integrations | `/contracts` integrations, country connectors | Payment/maps/SMS/WhatsApp provider adapters, country-connector layer, designed failure paths | PLANNED |
-| A24 Web Platform | `/apps/customer`, shared web packages | Motivra Drive (Next.js), request → live status → approval → history flows, shared UI implementation | FOUNDATION MERGED — PR #35 |
+| A24 Web Platform | `/apps/customer`, shared web packages | Motivra Drive (Next.js), request → live status → approval → history flows, shared UI implementation | FOUNDATION MERGED — PR #35; vehicle list wired to contract — PR #48 |
 | A25 API/Developer Platform | `/contracts`, developer platform service | Public API v1, API keys, OAuth apps, webhooks, sandbox, usage metering, SDKs | PLANNED |
 | A26 Observability/SRE | `/observability`, deployment observability stack | Dashboards-as-code, alert rules, SLO definitions, runbooks, incident process | FOUNDATION MERGED — PR #34 (runbook, compose, Dockerfile); dashboards/SLOs pending |
 | A27 Security Engineering | Cross-cutting review; security middleware in `/backend/platform` | Threat model, SAST/dependency/container scanning, secrets discipline, security review sign-off | FOUNDATION MERGED — PR #33 (SECURITY.md, CODEOWNERS), PR #37 (security review) |
-| A28 QA/Test Engineering | Test suites across `/backend`, `/apps`; E2E harness | Test strategy, unit/integration/contract/E2E coverage, offline-sync tests, failure-path tests | FOUNDATION MERGED — PR #37 (QA report, 153 tests verified); E2E harness pending |
+| A28 QA/Test Engineering | Test suites across `/backend`, `/apps`; E2E harness | Test strategy, unit/integration/contract/E2E coverage, offline-sync tests, failure-path tests | FOUNDATION MERGED — PR #37; round 2 + isolation matrix — PR #51 (183 tests) |
 | A29 DevEx | `scripts/`, `Makefile`, Docker Compose, service templates | Local dev environment (`make dev`), CI ergonomics, developer onboarding path | FOUNDATION MERGED — PRs #9 (Makefile), #34 (stack, seed) |
 | A30 Release Engineering | `/infrastructure`, `.github/workflows` | GitOps (Argo CD), Helm charts, canary + rollback automation, release pipeline | FOUNDATION MERGED — PR #34 (Docker, compose); Helm/Argo pending |
 
@@ -62,6 +62,10 @@ After the Wave 4 backend-core merges, feature work paused for validation per the
 ### Integration Window 2 (completed)
 
 Full-repo audit and readiness pass (backend → frontend → ops → docs). Merged: Apache-2.0 licensing with DCO intake (PR #32, ADR-0006); master build directive preserved in-repo with provenance audit trail (PR #33); deployment baseline — Dockerfile, full compose stack, env template, runbook, idempotent demo seed (PR #34); Motivra Drive web foundation — landing, auth, dashboard shell, typed API client scaffold, 12 component tests (PR #35); dependabot security bump verified locally then merged (PR #36); release-readiness QA report from fresh-clone verification — 153 tests green, contracts 1:1 with code, zero secret-scan hits (PR #37). Security automation: Dependabot alerts + automated security fixes + push protection enabled; secret scanning needs a one-time repo-settings toggle (API 404 on free plan). Newly tracked: vehicles listing endpoint gap (#38); open deferrals: hardening umbrella (#28), mobile foundation (#29), CI billing lock (#10, owner action). Cumulative: 16 merged PRs.
+
+### Integration Window 3 (completed)
+
+Deferral wave — the tracked backlog from Window 2 closed end-to-end. Merged: technician mobile foundation with offline outbox/sync and state-machine guards (PR #43, closes #29); dependabot bumps verified locally then merged (PRs #40, #41, #45 — superseded duplicate #42 closed); tenant-scoped vehicle listing GET /v1/vehicles (PR #46, closes #38); tenant scoping enforced + isolation-tested across identity/jobs/dispatch (PR #47); web vehicle list wired to the contract with pagination/error states (PR #48); domain event publishing (identity/jobs/vehicles, ADR-0002 topics) + shared pgtest harness + 6 PG-gated integration tests + 1 NATS e2e (PR #49, closes #28). QA round 2 on a fresh clone: 183 test functions green, contracts 22/22 with code, 16/16 isolation tests pass, gated suites compile+skip cleanly pending CI (PR #51, issue #50). Recovered-work provenance: two agent crashes (vehicles-02, harden-01/02) were resumed to completion by successor agents with review-then-fix (7 defects repaired). Open after window: CI billing lock (#10, owner), RUNBOOK gated-suite section (fixed this PR), uuid medium alert in technician toolchain.
 
 ## Status protocol
 

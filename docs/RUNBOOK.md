@@ -53,6 +53,26 @@ service: `GET /healthz` (liveness), `GET /readyz` (dependency checks),
 
 Stop the dev stack: `make dev-down`.
 
+### 2a. Gated test suites (Postgres + NATS integration)
+
+The integration suites are gated behind environment variables and skip automatically (with a clear message) when unset:
+
+| Suite | Gate variable |
+|---|---|
+| Store integration tests via `backend/platform/pgtest` (identity, jobs, vehicles) | `TEST_DATABASE_URL` |
+| Platform NATS end-to-end publish test | `TEST_NATS_URL` |
+
+Run them against the local dev stack:
+
+```bash
+make dev                                                            # postgres on 5432, nats client on 4222
+export TEST_DATABASE_URL='postgres://motivra:motivra@localhost:5432/motivra?sslmode=disable'
+export TEST_NATS_URL='nats://localhost:4222'
+go test ./backend/...
+```
+
+`pgtest` applies the per-domain migration chains (ADR-0003) before the tests run, so no manual migration step is needed. These suites execute automatically in CI once Actions billing is restored (issue #10).
+
 ---
 
 ## 3. Full-stack path (everything in containers)

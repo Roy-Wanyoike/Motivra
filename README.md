@@ -252,9 +252,9 @@ Execution proceeds in waves with integration windows between them — no continu
 |---|---|---|---|
 | 0 | Discovery & architecture | ADRs, domain map, contracts, design system, roadmap | **Done** (PRs #8, #9) |
 | 1 | Foundation | Platform primitives, identity & RBAC, observability backbone | **Done** (PRs #15, #16) |
-| 2 | Vehicle foundation | Registry, passport, append-only history | **Core merged** (PR #17); tenant scoping hardening next |
+| 2 | Vehicle foundation | Registry, passport, append-only history | **Merged** (PRs #17, #46); tenant scoping enforced + tested (PR #47) |
 | 3 | Inspection | Templates, evidence capture, verified reports | Planned |
-| 4 | Mobile garage | Jobs, dispatch engine, technician app, estimates | **Backend core merged** (PRs #21, #20); web foundation merged (PR #35); technician app tracked (#29) |
+| 4 | Mobile garage | Jobs, dispatch engine, technician app, estimates | **Backend core merged** (PRs #21, #20); web foundation + vehicle list wired (PRs #35, #48); technician foundation merged (PR #43) |
 | 5 | Money | Payments (M-Pesa first), ledger, warranties | Planned |
 | 6 | Network | Parts, garages, towing & roadside | Planned |
 | 7 | B2B | Fleet, dealer, developer platform & APIs | Planned |
