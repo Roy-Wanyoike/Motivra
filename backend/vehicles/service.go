@@ -135,10 +135,11 @@ func (s *Service) RegisterVehicle(ctx context.Context, v *Vehicle, actorID uuid.
 	})
 }
 
-// GetVehicle returns the vehicle with the given id, or a platform not-found
-// error when it does not exist.
-func (s *Service) GetVehicle(ctx context.Context, vehicleID uuid.UUID) (Vehicle, error) {
-	v, err := s.store.GetVehicle(ctx, vehicleID)
+// GetVehicle returns the vehicle with the given id within the caller's
+// scope, or a platform not-found error when it does not exist or is
+// invisible to the scope.
+func (s *Service) GetVehicle(ctx context.Context, vehicleID uuid.UUID, scope VehicleScope) (Vehicle, error) {
+	v, err := s.store.GetVehicle(ctx, vehicleID, scope)
 	if err != nil {
 		if errors.Is(err, ErrVehicleNotFound) {
 			return Vehicle{}, platform.ErrNotFound("vehicle not found")
@@ -197,10 +198,23 @@ func (s *Service) RecordEvent(ctx context.Context, e *HistoryEvent) error {
 	return s.publish(ctx, EventVehicleHistoryUpdated, e.VehicleID, nil, e.RecordedBy, payload)
 }
 
+// ListVehicles returns one keyset page of the registry visible to scope,
+// newest first. cursor positions the page (nil starts the listing); limit
+// bounds the page size (defaults and the cap mirror Store.ListVehicles).
+// The returned cursor is nil on the last page.
+func (s *Service) ListVehicles(ctx context.Context, scope VehicleScope, cursor *VehicleCursor, limit int) ([]Vehicle, *VehicleCursor, error) {
+	vehicles, next, err := s.store.ListVehicles(ctx, scope, cursor, limit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("vehicles: list vehicles: %w", err)
+	}
+	return vehicles, next, nil
+}
+
 // History returns the vehicle's history ordered by occurred_at descending,
-// newest first. Pagination semantics are defined by Store.ListHistory.
-func (s *Service) History(ctx context.Context, vehicleID uuid.UUID, limit, offset int) ([]HistoryEvent, error) {
-	events, err := s.store.ListHistory(ctx, vehicleID, limit, offset)
+// newest first, for a vehicle visible to scope. Pagination semantics are
+// defined by Store.ListHistory.
+func (s *Service) History(ctx context.Context, vehicleID uuid.UUID, scope VehicleScope, limit, offset int) ([]HistoryEvent, error) {
+	events, err := s.store.ListHistory(ctx, vehicleID, scope, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("vehicles: list history: %w", err)
 	}
@@ -208,9 +222,10 @@ func (s *Service) History(ctx context.Context, vehicleID uuid.UUID, limit, offse
 }
 
 // Passport returns the read-only Vehicle Passport assembled from the
-// vehicle_passports view, or a platform not-found error.
-func (s *Service) Passport(ctx context.Context, vehicleID uuid.UUID) (Passport, error) {
-	p, err := s.store.GetPassport(ctx, vehicleID)
+// vehicle_passports view for a vehicle within scope, or a platform
+// not-found error.
+func (s *Service) Passport(ctx context.Context, vehicleID uuid.UUID, scope VehicleScope) (Passport, error) {
+	p, err := s.store.GetPassport(ctx, vehicleID, scope)
 	if err != nil {
 		if errors.Is(err, ErrVehicleNotFound) {
 			return Passport{}, platform.ErrNotFound("vehicle not found")
@@ -225,12 +240,12 @@ func (s *Service) Passport(ctx context.Context, vehicleID uuid.UUID) (Passport, 
 // the new reading together with a mileage history event and publishes
 // vehicle.mileage.recorded.v1 carrying the old and new readings. Re-recording
 // the current reading is allowed (old and new are equal).
-func (s *Service) RecordMileage(ctx context.Context, vehicleID uuid.UUID, km int64, recordedBy *uuid.UUID) error {
+func (s *Service) RecordMileage(ctx context.Context, vehicleID uuid.UUID, km int64, recordedBy *uuid.UUID, scope VehicleScope) error {
 	if km < 0 {
 		return platform.ErrValidation("mileage must be non-negative",
 			platform.FieldError{Field: "odometer_km", Issue: "must be non-negative"})
 	}
-	current, err := s.store.GetVehicle(ctx, vehicleID)
+	current, err := s.store.GetVehicle(ctx, vehicleID, scope)
 	if err != nil {
 		if errors.Is(err, ErrVehicleNotFound) {
 			return platform.ErrNotFound("vehicle not found")

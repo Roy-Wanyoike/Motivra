@@ -40,16 +40,19 @@ Rollback: each migration ships a `.down.sql` (view → trigger/function → tabl
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/v1/vehicles` | 201; VIN normalized server-side; duplicate VIN → 409; validation → 422 |
+| GET | `/v1/vehicles` | one keyset page of the caller's registry, newest first; `?limit` (default 50, cap 100), `?cursor` (opaque); `next_cursor` absent on the last page |
 | GET | `/v1/vehicles/{vehicleID}` | 200 / 404 |
 | GET | `/v1/vehicles/{vehicleID}/passport` | 200 / 404 |
 | GET | `/v1/vehicles/{vehicleID}/history` | newest first; `?limit` (default 50, cap 200) `?offset` |
 | POST | `/v1/vehicles/{vehicleID}/mileage` | 204; owner or ADMIN/SUPER_ADMIN only (403); decrease → 409 |
 
 Every endpoint requires authentication (`platform.RequireAuthenticated`).
-Tenant scoping: the Store interface has no tenant filter yet, so reads are
-identity-scoped only. Tenant-scoped query variants land with the multi-tenancy
-hardening issue (ADR-0004) — filtering results in handlers is not acceptable
-and is deliberately not done.
+Tenant scoping (ADR-0004): every read is bounded by a `VehicleScope` derived
+only from the JWT claims and enforced inside the repository query — a tenant
+claim sees its organization's vehicles, a personal principal sees its own
+non-tenant vehicles, and the control-plane roles (ADMIN, SUPER_ADMIN) read
+across tenants under audit obligation. Out-of-scope rows answer 404, never
+the row. Filtering in handlers would not be acceptable and is not done.
 
 ## VIN validation
 

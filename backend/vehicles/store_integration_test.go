@@ -83,8 +83,11 @@ func TestVehiclePassportLifecycleIntegration(t *testing.T) {
 	err := svc.RegisterVehicle(ctx, duplicate, duplicate.OwnerUserID)
 	requireStatus(t, err, 409)
 
-	// Round-trip through GetVehicle.
-	got, err := svc.GetVehicle(ctx, v.ID)
+	// Round-trip through GetVehicle. The registering owner is a personal
+	// principal, so their owner-derived scope must see the row (ADR-0004:
+	// scope comes from the authenticated identity, exercised here end to end).
+	ownerScope := VehicleScope{OwnerID: &v.OwnerUserID}
+	got, err := svc.GetVehicle(ctx, v.ID, ownerScope)
 	require.NoError(t, err)
 	require.Equal(t, v.VIN, got.VIN)
 	require.Equal(t, v.Make, got.Make)
@@ -92,7 +95,7 @@ func TestVehiclePassportLifecycleIntegration(t *testing.T) {
 	require.Equal(t, int64(1000), got.MileageLatestKm)
 
 	// Registration seeds exactly one note event.
-	events, err := store.ListHistory(ctx, v.ID, 10, 0)
+	events, err := store.ListHistory(ctx, v.ID, ownerScope, 10, 0)
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	require.Equal(t, HistoryEventTypeNote, events[0].EventType)
@@ -106,20 +109,20 @@ func TestVehiclePassportLifecycleIntegration(t *testing.T) {
 
 	// A later mileage reading must land after the note event.
 	time.Sleep(20 * time.Millisecond)
-	require.NoError(t, svc.RecordMileage(ctx, v.ID, 1500, &v.OwnerUserID))
+	require.NoError(t, svc.RecordMileage(ctx, v.ID, 1500, &v.OwnerUserID, ownerScope))
 
-	passport, err := svc.Passport(ctx, v.ID)
+	passport, err := svc.Passport(ctx, v.ID, ownerScope)
 	require.NoError(t, err)
 	require.Equal(t, int64(1500), passport.MileageLatestKm)
 	require.Equal(t, int64(2), passport.ServiceEventCount)
 	require.NotNil(t, passport.LastServiceAt)
 
 	// The odometer must never decrease.
-	err = svc.RecordMileage(ctx, v.ID, 1400, &v.OwnerUserID)
+	err = svc.RecordMileage(ctx, v.ID, 1400, &v.OwnerUserID, ownerScope)
 	requireStatus(t, err, 409)
 
 	// History is ordered occurred_at DESC: the mileage event comes first.
-	events, err = svc.History(ctx, v.ID, 10, 0)
+	events, err = svc.History(ctx, v.ID, ownerScope, 10, 0)
 	require.NoError(t, err)
 	require.Len(t, events, 2)
 	require.Equal(t, HistoryEventTypeMileage, events[0].EventType)
@@ -146,4 +149,72 @@ func TestVehiclePassportLifecycleIntegration(t *testing.T) {
 		OccurredAt: time.Now().UTC(),
 	})
 	requireStatus(t, err, 422)
+}
+
+// TestListVehiclesKeysetIntegration verifies against real PostgreSQL that
+// the registry listing enforces the tenant boundary inside the SQL query and
+// that keyset pagination walks with no repeats and no gaps.
+func TestListVehiclesKeysetIntegration(t *testing.T) {
+	pool := integrationPool(t)
+	ctx := context.Background()
+	store := NewPostgresStore(pool)
+
+	tenantA, tenantB := uuid.New(), uuid.New()
+
+	// Five tenant-A vehicles with strictly increasing created_at
+	// (ordered[0] oldest).
+	ordered := make([]Vehicle, 0, 5)
+	for i := 0; i < 5; i++ {
+		v := &Vehicle{
+			TenantID:        &tenantA,
+			OwnerUserID:     uuid.New(),
+			VIN:             randomVIN(t),
+			Make:            "Honda",
+			Model:           "Accord",
+			Year:            2020,
+			MileageLatestKm: int64(1000 + i),
+		}
+		require.NoError(t, store.CreateVehicle(ctx, v))
+		time.Sleep(5 * time.Millisecond) // guarantee distinct created_at
+		ordered = append(ordered, *v)
+	}
+	// A tenant-B row and a personal row that must never leak into tenant A.
+	require.NoError(t, store.CreateVehicle(ctx, &Vehicle{
+		TenantID: &tenantB, OwnerUserID: uuid.New(),
+		VIN: randomVIN(t), Make: "Toyota", Model: "Hilux", Year: 2021,
+	}))
+	require.NoError(t, store.CreateVehicle(ctx, &Vehicle{
+		OwnerUserID: uuid.New(),
+		VIN:         randomVIN(t), Make: "Nissan", Model: "X-Trail", Year: 2022,
+	}))
+
+	scopeA := VehicleScope{TenantID: &tenantA}
+
+	// Isolation: tenant A sees exactly its five rows, newest first.
+	page, _, err := store.ListVehicles(ctx, scopeA, nil, 50)
+	require.NoError(t, err)
+	require.Len(t, page, 5)
+	for i := range page {
+		require.Equal(t, ordered[len(ordered)-1-i].ID, page[i].ID, "newest first")
+	}
+
+	// Walk keyset pages of two and confirm no repeats and no gaps.
+	seen := map[uuid.UUID]bool{}
+	var cursor *VehicleCursor
+	pages := 0
+	for {
+		page, next, err := store.ListVehicles(ctx, scopeA, cursor, 2)
+		require.NoError(t, err)
+		for _, v := range page {
+			require.False(t, seen[v.ID], "keyset pages must not repeat rows")
+			seen[v.ID] = true
+		}
+		pages++
+		if next == nil {
+			break
+		}
+		cursor = next
+	}
+	require.Equal(t, 3, pages, "five rows at page size two walk across three pages")
+	require.Len(t, seen, 5)
 }
