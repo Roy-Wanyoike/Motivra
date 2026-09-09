@@ -33,7 +33,7 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 - Pre-purchase inspection flow (Motivra Inspect wedge)
 - **Exit criteria:** inspector completes an inspection offline; report verifies against evidence
 
-## Wave 4 — Mobile garage (BACKEND CORE MERGED — PRs #21, #20; web foundation merged — PR #35)
+## Wave 4 — Mobile garage (BACKEND CORE MERGED — PRs #21, #20; web foundation merged — PR #35; mobile foundation + full conflict protocol merged — PRs #43, #59)
 
 - Jobs & service request engine (full state machine, extensive tests)
 - Dispatch engine with explainable scoring (fit, distance, equipment, inventory, performance)

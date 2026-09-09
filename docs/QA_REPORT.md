@@ -425,3 +425,56 @@ Known, honestly-documented deltas: (a) `vehicle.history.updated.v1` cannot yet c
 | Overall verdict | **Post-hardening foundation verified green locally and materially improved; NOT production-ready.** Gated by #10 (CI), runtime deployment evidence, managed infra, web real auth, mobile real storage/transport, Wave 5 payments. |
 
 *Round 2 contains no vanity claims. Every gate result above was produced by a command executed against the verification commit during this session; sandbox-impossible checks are labeled as such. Round-1 text above is preserved verbatim.*
+
+---
+
+## Round 3 (2026-09-09, post-window-4 continuous audit)
+
+### R3.1 Scope and method
+
+Continuous-audit re-verification per the directive's completion loop, run by the coordinator after Integration Window 3: fresh clone of `main` at `5e31945`, full local gate battery, forensic sweep of repository and local git history, then audit findings fixed through the standard Issue → Branch → PR flow with local gates as the merge gate (CI billing lock #10 unchanged). This round also absorbed the final tracked deferral (#55) and closed every agent-actionable finding from rounds 1–2.
+
+### R3.2 Independent gate results (fresh clone, `main` @ `5e31945`)
+
+| Gate | Command | Result |
+|---|---|---|
+| Go format | `gofmt -l ./backend ./cmd` | CLEAN (no output) |
+| Go build | `go build ./...` | exit 0 |
+| Go vet | `go vet ./...` | exit 0 |
+| Go tests (race) | `go test -race ./...` | ALL PACKAGES OK — 602 test cases executed (`=== RUN` count) |
+| Migrations | `bash scripts/validate_migrations.sh` | OK — 10 domains, 12 migrations |
+| Web install/lint/test/build | `npm ci && npm run lint && npm test && npm run build` | exit 0 — 17/17 tests, 6 routes (+ dynamic vehicle detail) |
+| Secret patterns | repo-wide regex sweep (ghp/AKIA/PEM/password=) | 2 hits, both benign test strings (test fixture + form-validation copy) |
+| Contracts ↔ routes | OpenAPI vs chi route registrations | 1:1 (incl. `listVehicles` GET /v1/vehicles) |
+| Repository hygiene | branch listing, `.gitignore` coverage, node_modules/.expo tracking | 22 merged branches stale (fixed, #53); app gitignores correct; 0 tracked artifacts |
+
+### R3.3 Findings and remediations (all merged)
+
+| # | Finding | Severity | Remediation | Evidence |
+|---|---|---|---|---|
+| 1 | 22 merged remote branches retained | p2 hygiene | Deleted after verifying 0 open PRs per branch; only `main` remains | issue #53 closed with evidence |
+| 2 | DCO 1.1 required by CONTRIBUTING/ADR-0006 but unenforced; 27/31 first-parent commits unsigned | p2 process | `scripts/check_dco.sh` (skips merge/web-flow commits; author name+email must match sign-off) + `dco` CI job + RUNBOOK §2b; history grandfathered with rationale (no force-push on protected main) | PR #56, closes #54; fixture suite 7/7 — self-test caught a real sign-off-email parser bug before shipping |
+| 3 | Dependabot alert #8 (medium): `uuid < 11.1.1` in `apps/technician` (transitive: expo → @expo/config-plugins → xcode) | p2 security | npm `overrides` pin `^11.1.1`; clean `npm ci` resolves 11.1.1; `uuid.v4()` (xcode's only call shape) verified against the new major | PR #58, closes #57; alert state now **fixed** |
+| 4 | Technician sync conflict-resolution TODOs untracked (three-way merge, 409 re-basing, uuid swap) | p2 (orphaned work) | Tracked as #55, then fully implemented: three-way merge (`src/sync/merge.ts`), 409-driven intent re-basing with persistent deduped rejected-intent records, unacknowledged conflicts survive pulls, `expo-crypto.randomUUID` (SDK-57 pin) with the weak-randomness path removed; all four TODOs deleted | PR #59, closes #55 — 47/47 technician tests (was 28), clean `npm ci`, typecheck 0 errors |
+| 5 | Local work-history loss risk across container resets | p2 provenance | Every recorded work commit verified an ancestor of GitHub `main` via merged-PR head SHAs (#8/#9/#16/#17/#20/#21); stale clones removed; worklog reconstructed with recovery record | Worklog Task 5 (reconstructed) + Task 6 |
+
+### R3.4 Round 3 verdict
+
+| Dimension | Verdict |
+|---|---|
+| Backend | **GREEN** (unchanged surface since the R3 gate run; later PRs #56/#58/#59 touch no Go code) |
+| Web (customer) | **GREEN** (unchanged surface; 17/17 + build verified this round) |
+| Mobile (technician) | **GREEN at its scope** — 47/47 pure-logic tests, typecheck clean, conflict protocol end-to-end tested incl. 409 paths; native build / real transport still out of scope |
+| Contracts | **GREEN** — 1:1 with implemented routes |
+| Security | **PASS** — 0 open Dependabot alerts, 0 real secret hits, DCO now a pipeline control (active when CI runs) |
+| Repository | **GREEN** — only `main`, only signed commits land going forward, history provenance verified |
+| Deployment | **STATIC-VALIDATION ONLY** (unchanged) |
+| Overall | **Code foundation fully verified; every agent-actionable backlog item closed. NOT production-ready** — remaining gates are owner actions and scoped feature waves: #10 CI billing, managed Postgres + secrets + domain/TLS, runtime deployment evidence, web real auth wiring, mobile real storage/transport, Wave 3 inspections (A09/A10) and Wave 5 payments (A17) — now specified as issues. |
+
+### R3.5 Remaining work (nothing untracked)
+
+1. **Owner**: resolve #10 (billing) → first real CI run → tighten ruleset with required checks; enable secret scanning in repo settings; rotate exposed PAT; social preview.
+2. **Owner/infra**: managed Postgres, secrets management, domain + TLS, first runtime deployment with health-check evidence.
+3. **Engineering (next waves, issued)**: inspections platform + evidence (Wave 3), payments M-Pesa-first foundation (Wave 5), technician app SQLite persistence + real transport, web real auth flow.
+
+*Rounds 1–2 text above is preserved verbatim. Every R3 result was produced by a command executed during this session; sandbox-impossible checks are labeled as such.*
