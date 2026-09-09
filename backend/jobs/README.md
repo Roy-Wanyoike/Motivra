@@ -92,8 +92,9 @@ sentinels `ErrConflict`, `ErrAlreadyConverted`, `ErrRequestNotFound`,
 | `job.status.changed.v1` | any legal transition (payload carries from/to/reason/actor) |
 | `job.assigned.v1` | a technician is dispatched to a job |
 
-The publisher is currently nil in `cmd/jobs` (NATS wiring lands with the
-notifications wave); `Service` skips publishing while it is nil.
+`cmd/jobs` constructs a `platform.NATSPublisher` when `MOTIVRA_NATS_URL` is
+set (issue #28, deferral 2); while the variable is unset the service runs
+with a nil publisher and `Service` skips publishing.
 
 ## Service wiring
 

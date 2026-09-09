@@ -216,11 +216,15 @@ func (f *fakeStore) ListTransitions(_ context.Context, jobID uuid.UUID, scope Re
 	return out, nil
 }
 
-// capturePublisher records every published event and can be told to fail.
+// capturePublisher records every published event (and the domain it was
+// published under) and can be told to fail. The event itself is recorded
+// verbatim — the envelope's correlation_id carries the request id from
+// issue #28's wiring, so mutating it here would hide regressions.
 type capturePublisher struct {
-	mu     sync.Mutex
-	events []platform.Event
-	fail   bool
+	mu      sync.Mutex
+	events  []platform.Event
+	domains []string
+	fail    bool
 }
 
 func (p *capturePublisher) Publish(_ context.Context, domain string, e platform.Event) error {
@@ -229,9 +233,20 @@ func (p *capturePublisher) Publish(_ context.Context, domain string, e platform.
 	if p.fail {
 		return errors.New("jetstream unavailable")
 	}
-	e.CorrelationID = domain // record the domain the service chose
+	p.domains = append(p.domains, domain)
 	p.events = append(p.events, e)
 	return nil
+}
+
+// domainOf returns the domain recorded for the i-th published event.
+func (p *capturePublisher) domainOf(t *testing.T, i int) string {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if i < 0 || i >= len(p.domains) {
+		t.Fatalf("no domain recorded for event %d", i)
+	}
+	return p.domains[i]
 }
 
 func (p *capturePublisher) ofType(t *testing.T, eventType string) []platform.Event {
@@ -300,7 +315,8 @@ func TestCreateRequestPublishesReceivedEvent(t *testing.T) {
 	events := pub.ofType(t, EventRequestReceived)
 	require.Len(t, events, 1)
 	e := events[0]
-	assert.Equal(t, "jobs", e.CorrelationID, "publish domain must be jobs")
+	assert.Equal(t, EventDomain, pub.domainOf(t, 0), "publish domain must be jobs")
+	assert.Equal(t, "", e.CorrelationID, "non-HTTP callers publish an empty correlation_id")
 	assert.Equal(t, r.ID.String(), e.AggregateID)
 	var payload RequestReceivedPayload
 	require.NoError(t, json.Unmarshal(e.Payload, &payload))

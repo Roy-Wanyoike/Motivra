@@ -3,7 +3,6 @@ package vehicles
 import (
 	"context"
 	"math/rand/v2"
-	"os"
 	"testing"
 	"time"
 
@@ -12,23 +11,25 @@ import (
 	"github.com/stretchr/testify/require"
 
 	vehiclesmigrations "github.com/Roy-Wanyoike/Motivra/backend/migrations/vehicles"
-	"github.com/Roy-Wanyoike/Motivra/backend/platform"
+	"github.com/Roy-Wanyoike/Motivra/backend/platform/pgtest"
 )
 
-// integrationPool skips the test unless TEST_DATABASE_URL is set, then opens
-// a pool and applies the vehicles migration chain with the domain-specific
-// schema_migrations table.
+// vehicleTables are the base tables of the vehicles chain, truncated before
+// each test so every one starts from a clean schema (vehicle_passports is a
+// read-only view; vehicle_components and vehicle_service_history cascade
+// from vehicles).
+var vehicleTables = []string{"vehicles", "vehicle_components", "vehicle_service_history"}
+
+// integrationPool connects to the Postgres instance named by
+// TEST_DATABASE_URL through the shared pgtest harness (issue #28, deferral
+// 3), applies the vehicles migration chain with the domain-specific
+// schema_migrations table and starts every test from a clean schema. Tests
+// skip when the variable is unset.
 func integrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping Postgres integration test")
-	}
-	ctx := context.Background()
-	pool, err := platform.NewPostgres(ctx, url)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
-	require.NoError(t, platform.MigrateUp(ctx, pool, vehiclesmigrations.FS, "schema_migrations_vehicles"))
+	pool := pgtest.Pool(t)
+	pgtest.Migrate(t, pool, vehiclesmigrations.FS, "schema_migrations_vehicles")
+	pgtest.Truncate(t, pool, vehicleTables...)
 	return pool
 }
 

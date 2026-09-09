@@ -49,12 +49,33 @@ route. Middleware is never the only check for sensitive resources.
 
 ## Audit actions
 
-Written to `audit_log` for every register, login, refresh (rotation) and
-logout (both refresh-token and session-id paths): `identity.user.registered`,
-`identity.user.login`, `identity.session.refreshed`,
-`identity.session.revoked`. Entries carry actor, object, tenant (when
+Written to `audit_log` for every register, login, refresh (rotation),
+logout (both refresh-token and session-id paths) and role grant:
+`identity.user.registered`, `identity.user.login`,
+`identity.session.refreshed`, `identity.session.revoked`,
+`identity.role.granted`. Entries carry actor, object, tenant (when
 applicable) and metadata (device, IP, email on registration). **Audit
 failures fail the request** — signals are never dropped silently.
+
+## Events (ADR-0002)
+
+Published via `platform.Publisher` on subject `motivra.identity.<event_type>`
+after every write of the underlying fact has succeeded (user row + session +
+audit for registration; grant row + audit for grants). `cmd/identity`
+constructs a `platform.NATSPublisher` when `MOTIVRA_NATS_URL` is set (issue
+#28, deferral 2); while the variable is unset the service runs with a nil
+publisher and skips publishing:
+
+| Event | When | Payload highlights |
+|---|---|---|
+| `user.created.v1` | registration fully succeeds | user_id, status, roles — never credential material or transport metadata |
+| `role.granted.v1` | a role grant is persisted and audited | user_id, role, tenant_id? (omitted for personal grants) |
+
+`role.granted.v1` is emitted by `Service.AssignRole` (store write → audit →
+event); the admin HTTP route that will call it needs a contract addition and
+is tracked with the role-management work. The envelope carries the acting
+principal as `actor_id` and the platform request id as `correlation_id`;
+`causation_id` stays null (these are request-initiated events).
 
 ## Token model
 

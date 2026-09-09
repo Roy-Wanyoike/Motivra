@@ -14,15 +14,20 @@ import (
 // Service is the identity domain's application service. It composes the
 // SessionStore persistence contract with the token Issuer and guarantees
 // that every authentication-relevant state change is audited; a failed
-// audit record fails the request.
+// audit record fails the request. Successful registration and role grants
+// additionally publish domain events through the platform Publisher
+// (ADR-0002); publisher may be nil (tests, offline tooling, deployments
+// without MOTIVRA_NATS_URL), in which case publishing is skipped.
 type Service struct {
-	store  SessionStore
-	issuer *Issuer
+	store     SessionStore
+	issuer    *Issuer
+	publisher platform.Publisher
 }
 
-// NewService builds a Service over the given store and token issuer.
-func NewService(store SessionStore, issuer *Issuer) *Service {
-	return &Service{store: store, issuer: issuer}
+// NewService builds a Service over the given store, token issuer and event
+// publisher.
+func NewService(store SessionStore, issuer *Issuer, publisher platform.Publisher) *Service {
+	return &Service{store: store, issuer: issuer, publisher: publisher}
 }
 
 // emailPattern is a pragmatic RFC-5321-shaped address check: one local part,
@@ -88,6 +93,17 @@ func (s *Service) Register(ctx context.Context, email, phone, password, fullName
 		"email":       user.Email,
 		"device_name": deviceName,
 		"ip_address":  ip,
+	}); err != nil {
+		return AccessResponse{}, err
+	}
+	// Every write of the registration succeeded (user row, session,
+	// audit); the event marks that completed fact. The payload carries
+	// IDs and state names only, never credential material. The
+	// registrant is the actor of their own account creation.
+	if err := s.publish(ctx, EventUserCreated, user.ID.String(), "", user.ID.String(), UserCreatedPayload{
+		UserID: user.ID,
+		Status: user.Status,
+		Roles:  user.Roles,
 	}); err != nil {
 		return AccessResponse{}, err
 	}
@@ -224,6 +240,39 @@ func (s *Service) LogoutByRefreshToken(ctx context.Context, refreshToken string,
 	}
 	return s.audit(ctx, actorID, ActionSessionRevoked, "session", sess.ID.String(), map[string]any{
 		"via": "refresh_token",
+	})
+}
+
+// AssignRole grants role to the user, optionally scoped to a tenant,
+// records the privileged action in the audit trail and publishes
+// role.granted.v1. The store write happens first; the audit row and the
+// event both follow it, and any failure fails the request. Unknown roles
+// and duplicate grants surface the store's validation and conflict errors.
+// actorID is the authenticated principal performing the grant (the zero
+// UUID records a system actor). There is no HTTP surface yet — the admin
+// role-assignment route needs a contract addition (noted in PR for #28);
+// this method is the service-layer seam that route will call.
+func (s *Service) AssignRole(ctx context.Context, userID uuid.UUID, role Role, tenantID *uuid.UUID, actorID uuid.UUID) error {
+	if err := s.store.AssignRole(ctx, userID, role, tenantID); err != nil {
+		return err
+	}
+	if err := s.audit(ctx, actorID, ActionRoleGranted, "user", userID.String(), map[string]any{
+		"role": string(role),
+	}); err != nil {
+		return err
+	}
+	tenant := ""
+	if tenantID != nil {
+		tenant = tenantID.String()
+	}
+	actor := ""
+	if actorID != (uuid.UUID{}) {
+		actor = actorID.String()
+	}
+	return s.publish(ctx, EventRoleGranted, userID.String(), tenant, actor, RoleGrantedPayload{
+		UserID:   userID,
+		Role:     role,
+		TenantID: tenantID,
 	})
 }
 

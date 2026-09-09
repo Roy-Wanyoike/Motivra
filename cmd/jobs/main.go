@@ -53,11 +53,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The JetStream publisher wiring lands with the notifications wave: the
-	// service deliberately starts with a nil publisher, and jobs.NewService
-	// skips event publishing until then. Swap in a platform.NATSPublisher
-	// (and add its cleanup) when NATS_URL is provisioned for this service.
-	svc := jobs.NewService(jobs.NewPostgresStore(pool), nil)
+	// Events publish on JetStream when MOTIVRA_NATS_URL is set (issue #28,
+	// deferral 2); without it the service runs with a nil publisher and
+	// jobs.NewService skips event publishing — local and test
+	// deployments stay broker-free.
+	var publisher *platform.NATSPublisher
+	if cfg.NATS.URL != "" {
+		publisher, err = platform.NewNATSPublisher(ctx, cfg.NATS.URL)
+		if err != nil {
+			logger.Error("nats unavailable", "error", err)
+			os.Exit(1)
+		}
+	}
+	svc := jobs.NewService(jobs.NewPostgresStore(pool), publisher)
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
 	srv := platform.NewServer(cfg, logger,
@@ -79,11 +87,15 @@ func main() {
 	}
 	logger.Info("service_listening", "port", cfg.App.Port, "service", cfg.App.Name)
 
-	if err := platform.Graceful(httpSrv, logger, cfg.ShutdownTimeout,
+	cleanups := []func(context.Context) error{
 		func(context.Context) error { pool.Close(); return nil },
-		stopMetrics,
-		stopTracing,
-	); err != nil {
+	}
+	if publisher != nil {
+		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
+	}
+	cleanups = append(cleanups, stopMetrics, stopTracing)
+
+	if err := platform.Graceful(httpSrv, logger, cfg.ShutdownTimeout, cleanups...); err != nil {
 		logger.Error("shutdown completed with errors", "error", err)
 		os.Exit(1)
 	}

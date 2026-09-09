@@ -9,10 +9,12 @@ import (
 	"github.com/Roy-Wanyoike/Motivra/backend/platform"
 )
 
-// newTestService wires a Service over the in-memory store.
+// newTestService wires a Service over the in-memory store. The publisher
+// stays nil: the event-publishing unit tests live in events_test.go with
+// their own recording publisher.
 func newTestService() (*Service, *fakeStore) {
 	store := newFakeStore()
-	return NewService(store, newTestIssuer()), store
+	return NewService(store, newTestIssuer(), nil), store
 }
 
 // appErr converts err into the platform error for status/code assertions.

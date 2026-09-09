@@ -51,15 +51,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Events publish on JetStream when MOTIVRA_NATS_URL is set (issue #28,
+	// deferral 2); without it the service runs with a nil publisher and
+	// identity.NewService skips event publishing — local and test
+	// deployments stay broker-free.
+	var publisher *platform.NATSPublisher
+	if cfg.NATS.URL != "" {
+		publisher, err = platform.NewNATSPublisher(ctx, cfg.NATS.URL)
+		if err != nil {
+			logger.Error("nats unavailable", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	store := identity.NewPostgresStore(pool)
 	issuer := identity.NewIssuer(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
-	svc := identity.NewService(store, issuer)
+	svc := identity.NewService(store, issuer, publisher)
 
 	cleanups := []func(context.Context) error{
 		func(context.Context) error { pool.Close(); return nil },
-		stopMetrics,
-		stopTracing,
 	}
+	if publisher != nil {
+		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
+	}
+	cleanups = append(cleanups, stopMetrics, stopTracing)
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
 	srv := platform.NewServer(cfg, logger,
