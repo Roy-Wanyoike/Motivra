@@ -60,6 +60,62 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Error'
+    get:
+      operationId: listVehicles
+      summary: List vehicles in the caller's scope
+      description: |
+        Returns the vehicles visible to the authenticated principal, newest
+        first (`created_at DESC, id DESC` — a stable keyset order).
+
+        The scope is derived from the JWT claims, never from a query
+        parameter: a token carrying a `tenant_id` claim lists that
+        organization's vehicles; a personal token lists only the vehicles
+        registered outside any tenant and owned by the caller. The
+        organizational boundary is enforced in the repository query itself
+        (ADR-0004).
+
+        Pagination is keyset-based (`limit` + opaque `cursor`): pass the
+        `next_cursor` value of one page as `cursor` to fetch the next. Pages
+        are stable under concurrent registrations — rows neither repeat nor
+        get skipped across page boundaries. `next_cursor` is absent when the
+        page is the last one.
+      tags: [vehicles]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 50; values above 100 are capped at 100.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque keyset cursor taken from a previous response's `next_cursor`.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One page of vehicles, newest first. Empty array when nothing is visible to the caller yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VehicleList'
+        '401':
+          description: Authentication required.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid pagination parameters (non-integer or non-positive limit, malformed cursor).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /v1/vehicles/{vehicleID}:
     get:
       operationId: getVehicle
@@ -307,6 +363,20 @@ components:
         updated_at:
           type: string
           format: date-time
+    VehicleList:
+      type: object
+      description: One page of the caller's vehicle list (newest first).
+      required:
+        - vehicles
+      properties:
+        vehicles:
+          type: array
+          description: The page's vehicles (same schema as the single-vehicle response).
+          items:
+            $ref: '#/components/schemas/Vehicle'
+        next_cursor:
+          type: string
+          description: Opaque keyset cursor for the next page. Absent when this page is the last one.
     CreateVehicleRequest:
       type: object
       required:

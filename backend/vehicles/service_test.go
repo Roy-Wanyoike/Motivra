@@ -60,27 +60,77 @@ func (f *fakeStore) CreateVehicle(_ context.Context, v *Vehicle) error {
 	return nil
 }
 
-func (f *fakeStore) GetVehicle(_ context.Context, vehicleID uuid.UUID) (Vehicle, error) {
+func (f *fakeStore) GetVehicle(_ context.Context, vehicleID uuid.UUID, scope VehicleScope) (Vehicle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	v, ok := f.vehicles[vehicleID]
-	if !ok {
+	if !ok || !scopeAllows(scope, v) {
 		return Vehicle{}, fmt.Errorf("vehicles: get vehicle %s: %w", vehicleID, ErrVehicleNotFound)
 	}
 	return v, nil
 }
 
-func (f *fakeStore) ListVehiclesByOwner(_ context.Context, ownerID uuid.UUID) ([]Vehicle, error) {
+// scopeAllows mirrors the repository boundary in memory: tenant rows for
+// tenant principals, own personal rows for personal principals, everything
+// for the control plane (zero-value scope).
+func scopeAllows(scope VehicleScope, v Vehicle) bool {
+	switch {
+	case scope.Unrestricted():
+		return true
+	case scope.TenantID != nil:
+		return v.TenantID != nil && *v.TenantID == *scope.TenantID
+	default:
+		return v.TenantID == nil && v.OwnerUserID == *scope.OwnerID
+	}
+}
+
+// vehicleKeyLess reports whether a's keyset position sorts before b's under
+// the registry ordering (created_at DESC, id DESC): the next page starts at
+// the first row strictly smaller than the cursor.
+func vehicleKeyLess(a, b Vehicle) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID.String() < b.ID.String()
+}
+
+func (f *fakeStore) ListVehicles(_ context.Context, scope VehicleScope, cursor *VehicleCursor, limit int) ([]Vehicle, *VehicleCursor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]Vehicle, 0)
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
+	}
+	all := make([]Vehicle, 0, len(f.vehicles))
 	for _, v := range f.vehicles {
-		if v.OwnerUserID == ownerID {
-			out = append(out, v)
+		if scopeAllows(scope, v) {
+			all = append(all, v)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
-	return out, nil
+	sort.Slice(all, func(i, j int) bool { return vehicleKeyLess(all[j], all[i]) })
+
+	start := 0
+	if cursor != nil {
+		probe := Vehicle{CreatedAt: cursor.CreatedAt, ID: cursor.ID}
+		start = len(all)
+		for i, v := range all {
+			if vehicleKeyLess(v, probe) {
+				start = i
+				break
+			}
+		}
+	}
+	page := all[start:]
+	var next *VehicleCursor
+	if len(page) > limit {
+		next = &VehicleCursor{CreatedAt: page[limit-1].CreatedAt, ID: page[limit-1].ID}
+		page = page[:limit]
+	}
+	out := make([]Vehicle, len(page))
+	copy(out, page)
+	return out, next, nil
 }
 
 func (f *fakeStore) RecordHistoryEvent(_ context.Context, e HistoryEvent) error {
@@ -93,9 +143,13 @@ func (f *fakeStore) RecordHistoryEvent(_ context.Context, e HistoryEvent) error 
 	return nil
 }
 
-func (f *fakeStore) ListHistory(_ context.Context, vehicleID uuid.UUID, limit, offset int) ([]HistoryEvent, error) {
+func (f *fakeStore) ListHistory(_ context.Context, vehicleID uuid.UUID, scope VehicleScope, limit, offset int) ([]HistoryEvent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	v, ok := f.vehicles[vehicleID]
+	if !ok || !scopeAllows(scope, v) {
+		return nil, fmt.Errorf("vehicles: list history %s: %w", vehicleID, ErrVehicleNotFound)
+	}
 	if limit <= 0 {
 		limit = defaultHistoryLimit
 	}
@@ -118,11 +172,11 @@ func (f *fakeStore) ListHistory(_ context.Context, vehicleID uuid.UUID, limit, o
 	return events, nil
 }
 
-func (f *fakeStore) GetPassport(_ context.Context, vehicleID uuid.UUID) (Passport, error) {
+func (f *fakeStore) GetPassport(_ context.Context, vehicleID uuid.UUID, scope VehicleScope) (Passport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	v, ok := f.vehicles[vehicleID]
-	if !ok {
+	if !ok || !scopeAllows(scope, v) {
 		return Passport{}, fmt.Errorf("vehicles: get passport %s: %w", vehicleID, ErrVehicleNotFound)
 	}
 	p := Passport{
@@ -265,7 +319,7 @@ func TestRegisterVehicleNormalizesVINAndPublishesCreated(t *testing.T) {
 	assert.Equal(t, v.OwnerUserID.String(), payload["owner_user_id"])
 	assert.Equal(t, float64(1200), payload["mileage_latest_km"])
 
-	history, err := store.ListHistory(context.Background(), v.ID, 10, 0)
+	history, err := store.ListHistory(context.Background(), v.ID, VehicleScope{}, 10, 0)
 	require.NoError(t, err)
 	require.Len(t, history, 1, "registration must seed exactly one history event")
 	assert.Equal(t, HistoryEventTypeNote, history[0].EventType)
@@ -437,7 +491,7 @@ func TestHistoryReturnsNewestFirst(t *testing.T) {
 		ids = append(ids, e.ID)
 	}
 
-	got, err := svc.History(context.Background(), v.ID, 0, 0)
+	got, err := svc.History(context.Background(), v.ID, VehicleScope{}, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, got, 4, "seeded note plus three recorded events")
 	assert.Equal(t, HistoryEventTypeNote, got[0].EventType, "the seeded note carries the registration timestamp")
@@ -453,7 +507,7 @@ func TestRecordMileageRejectsNegative(t *testing.T) {
 	t.Parallel()
 	svc := NewService(newFakeStore(), nil)
 
-	err := svc.RecordMileage(context.Background(), uuid.New(), -1, nil)
+	err := svc.RecordMileage(context.Background(), uuid.New(), -1, nil, VehicleScope{})
 	requireStatus(t, err, http.StatusUnprocessableEntity)
 }
 
@@ -464,10 +518,10 @@ func TestRecordMileageRejectsDecrease(t *testing.T) {
 	svc := NewService(store, pub)
 	v := registerTestVehicle(t, svc, 1000)
 
-	err := svc.RecordMileage(context.Background(), v.ID, 999, nil)
+	err := svc.RecordMileage(context.Background(), v.ID, 999, nil, VehicleScope{})
 	requireStatus(t, err, http.StatusConflict)
 
-	got, err := svc.GetVehicle(context.Background(), v.ID)
+	got, err := svc.GetVehicle(context.Background(), v.ID, VehicleScope{})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1000), got.MileageLatestKm, "mileage must be unchanged after a rejected decrease")
 
@@ -484,7 +538,7 @@ func TestRecordMileagePublishesOldAndNewKm(t *testing.T) {
 	v := registerTestVehicle(t, svc, 1000)
 
 	recorder := uuid.New()
-	require.NoError(t, svc.RecordMileage(context.Background(), v.ID, 1500, &recorder))
+	require.NoError(t, svc.RecordMileage(context.Background(), v.ID, 1500, &recorder, VehicleScope{}))
 
 	_, events := pub.published()
 	require.Len(t, events, 2)
@@ -497,11 +551,11 @@ func TestRecordMileagePublishesOldAndNewKm(t *testing.T) {
 	assert.Equal(t, float64(1000), payload["old_km"])
 	assert.Equal(t, float64(1500), payload["new_km"])
 
-	got, err := svc.GetVehicle(context.Background(), v.ID)
+	got, err := svc.GetVehicle(context.Background(), v.ID, VehicleScope{})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1500), got.MileageLatestKm)
 
-	p, err := svc.Passport(context.Background(), v.ID)
+	p, err := svc.Passport(context.Background(), v.ID, VehicleScope{})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1500), p.MileageLatestKm)
 	assert.Equal(t, int64(2), p.ServiceEventCount, "registration note plus mileage event")
@@ -512,7 +566,7 @@ func TestRecordMileageVehicleNotFound(t *testing.T) {
 	t.Parallel()
 	svc := NewService(newFakeStore(), nil)
 
-	err := svc.RecordMileage(context.Background(), uuid.New(), 100, nil)
+	err := svc.RecordMileage(context.Background(), uuid.New(), 100, nil, VehicleScope{})
 	requireStatus(t, err, http.StatusNotFound)
 }
 
@@ -528,7 +582,7 @@ func TestGetVehicleMapsMissingRowToNotFound(t *testing.T) {
 	store.vehicles = map[uuid.UUID]Vehicle{}
 	store.mu.Unlock()
 
-	_, err := svc.GetVehicle(context.Background(), v.ID)
+	_, err := svc.GetVehicle(context.Background(), v.ID, VehicleScope{})
 	require.Error(t, err)
 	requireStatus(t, err, http.StatusNotFound)
 	assert.Equal(t, "not_found", platform.AsError(err).Code)

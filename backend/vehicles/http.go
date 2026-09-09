@@ -25,8 +25,9 @@ const maxRequestBytes int64 = 64 << 10
 
 // Routes registers the Vehicle Identity HTTP API on r:
 //
-//	POST   /v1/vehicles                     register a vehicle
-//	GET    /v1/vehicles/{vehicleID}         fetch one vehicle
+//	POST   /v1/vehicles                        register a vehicle
+//	GET    /v1/vehicles                        scoped, paginated registry listing
+//	GET    /v1/vehicles/{vehicleID}            fetch one vehicle
 //	GET    /v1/vehicles/{vehicleID}/passport   read the Vehicle Passport
 //	GET    /v1/vehicles/{vehicleID}/history    paginated history (newest first)
 //	POST   /v1/vehicles/{vehicleID}/mileage    record an odometer reading
@@ -37,6 +38,7 @@ const maxRequestBytes int64 = 64 << 10
 func Routes(r chi.Router, svc *Service, requireAuth func(http.HandlerFunc) http.HandlerFunc) {
 	r.Route("/v1/vehicles", func(r chi.Router) {
 		r.Post("/", requireAuth(svc.handleCreateVehicle))
+		r.Get("/", requireAuth(svc.handleListVehicles))
 		r.Route("/{vehicleID}", func(r chi.Router) {
 			r.Get("/", requireAuth(svc.handleGetVehicle))
 			r.Get("/passport", requireAuth(svc.handleGetPassport))
@@ -88,6 +90,14 @@ type historyEventResponse struct {
 	OdometerKm  *int64     `json:"odometer_km,omitempty"`
 	RecordedBy  *uuid.UUID `json:"recorded_by,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
+}
+
+// vehicleListResponse is the wire form of one registry listing page. It
+// reuses vehicleResponse for the rows; next_cursor is omitted on the last
+// page.
+type vehicleListResponse struct {
+	Vehicles   []vehicleResponse `json:"vehicles"`
+	NextCursor *string           `json:"next_cursor,omitempty"`
 }
 
 // passportResponse is the wire form of the read-only Vehicle Passport.
@@ -200,7 +210,8 @@ func (s *Service) handleCreateVehicle(w http.ResponseWriter, r *http.Request) {
 
 // handleGetVehicle implements GET /v1/vehicles/{vehicleID}.
 func (s *Service) handleGetVehicle(w http.ResponseWriter, r *http.Request) {
-	if _, ok := platform.ClaimsFromContext(r.Context()); !ok {
+	claims, ok := platform.ClaimsFromContext(r.Context())
+	if !ok {
 		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
@@ -209,7 +220,12 @@ func (s *Service) handleGetVehicle(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, err)
 		return
 	}
-	v, err := s.GetVehicle(r.Context(), vehicleID)
+	scope, err := scopeFromClaims(claims)
+	if err != nil {
+		platform.WriteError(w, err)
+		return
+	}
+	v, err := s.GetVehicle(r.Context(), vehicleID, scope)
 	if err != nil {
 		platform.WriteError(w, err)
 		return
@@ -219,7 +235,8 @@ func (s *Service) handleGetVehicle(w http.ResponseWriter, r *http.Request) {
 
 // handleGetPassport implements GET /v1/vehicles/{vehicleID}/passport.
 func (s *Service) handleGetPassport(w http.ResponseWriter, r *http.Request) {
-	if _, ok := platform.ClaimsFromContext(r.Context()); !ok {
+	claims, ok := platform.ClaimsFromContext(r.Context())
+	if !ok {
 		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
@@ -228,7 +245,12 @@ func (s *Service) handleGetPassport(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, err)
 		return
 	}
-	p, err := s.Passport(r.Context(), vehicleID)
+	scope, err := scopeFromClaims(claims)
+	if err != nil {
+		platform.WriteError(w, err)
+		return
+	}
+	p, err := s.Passport(r.Context(), vehicleID, scope)
 	if err != nil {
 		platform.WriteError(w, err)
 		return
@@ -237,13 +259,20 @@ func (s *Service) handleGetPassport(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListHistory implements GET /v1/vehicles/{vehicleID}/history with
-// ?limit (default 50, capped at 200) and ?offset.
+// ?limit (default 50, capped at 200) and ?offset. The vehicle must be
+// visible to the caller's scope.
 func (s *Service) handleListHistory(w http.ResponseWriter, r *http.Request) {
-	if _, ok := platform.ClaimsFromContext(r.Context()); !ok {
+	claims, ok := platform.ClaimsFromContext(r.Context())
+	if !ok {
 		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
 	vehicleID, err := vehicleIDFromRequest(r)
+	if err != nil {
+		platform.WriteError(w, err)
+		return
+	}
+	scope, err := scopeFromClaims(claims)
 	if err != nil {
 		platform.WriteError(w, err)
 		return
@@ -253,7 +282,7 @@ func (s *Service) handleListHistory(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, err)
 		return
 	}
-	events, err := s.History(r.Context(), vehicleID, limit, offset)
+	events, err := s.History(r.Context(), vehicleID, scope, limit, offset)
 	if err != nil {
 		platform.WriteError(w, err)
 		return
@@ -266,7 +295,8 @@ func (s *Service) handleListHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRecordMileage implements POST /v1/vehicles/{vehicleID}/mileage.
-// Only the vehicle owner or an ADMIN/SUPER_ADMIN may record a reading.
+// The vehicle must be visible to the caller's scope and only the vehicle
+// owner or an ADMIN/SUPER_ADMIN may record a reading.
 func (s *Service) handleRecordMileage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := platform.ClaimsFromContext(r.Context())
 	if !ok {
@@ -274,6 +304,11 @@ func (s *Service) handleRecordMileage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	vehicleID, err := vehicleIDFromRequest(r)
+	if err != nil {
+		platform.WriteError(w, err)
+		return
+	}
+	scope, err := scopeFromClaims(claims)
 	if err != nil {
 		platform.WriteError(w, err)
 		return
@@ -289,7 +324,7 @@ func (s *Service) handleRecordMileage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v, err := s.GetVehicle(r.Context(), vehicleID)
+	v, err := s.GetVehicle(r.Context(), vehicleID, scope)
 	if err != nil {
 		platform.WriteError(w, err)
 		return
@@ -303,7 +338,7 @@ func (s *Service) handleRecordMileage(w http.ResponseWriter, r *http.Request) {
 		platform.WriteError(w, platform.ErrUnauthorized("authenticated subject is not a user identifier"))
 		return
 	}
-	if err := s.RecordMileage(r.Context(), vehicleID, *req.OdometerKm, &recorder); err != nil {
+	if err := s.RecordMileage(r.Context(), vehicleID, *req.OdometerKm, &recorder, scope); err != nil {
 		platform.WriteError(w, err)
 		return
 	}
@@ -321,6 +356,70 @@ func canMutate(claims platform.Claims, v Vehicle) bool {
 		return false
 	}
 	return userID == v.OwnerUserID
+}
+
+// scopeFromClaims derives the vehicle data boundary from the authenticated
+// claims (never from client input, ADR-0004): a tenant claim scopes an
+// organizational principal to its organization; a personal principal is
+// scoped to the vehicles it owns; the control-plane roles (ADMIN,
+// SUPER_ADMIN) read across tenants under audit obligation. A malformed
+// tenant or subject claim is an authentication failure.
+func scopeFromClaims(claims platform.Claims) (VehicleScope, error) {
+	if claims.Role == RoleAdmin || claims.Role == RoleSuperAdmin {
+		return VehicleScope{}, nil
+	}
+	tenantID, err := tenantIDFromClaims(claims)
+	if err != nil {
+		return VehicleScope{}, platform.ErrUnauthorized("authenticated tenant claim is not a tenant identifier")
+	}
+	if tenantID != nil {
+		return VehicleScope{TenantID: tenantID}, nil
+	}
+	ownerID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		return VehicleScope{}, platform.ErrUnauthorized("authenticated subject is not a user identifier")
+	}
+	return VehicleScope{OwnerID: &ownerID}, nil
+}
+
+// handleListVehicles implements GET /v1/vehicles with ?limit (default 50,
+// capped at 100) and the opaque keyset ?cursor. The scope comes from the
+// JWT claims only; there is deliberately no tenant query parameter.
+func (s *Service) handleListVehicles(w http.ResponseWriter, r *http.Request) {
+	claims, ok := platform.ClaimsFromContext(r.Context())
+	if !ok {
+		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+		return
+	}
+	scope, err := scopeFromClaims(claims)
+	if err != nil {
+		platform.WriteError(w, err)
+		return
+	}
+	limit, cursor, err := listVehiclesPagination(r)
+	if err != nil {
+		platform.WriteError(w, err)
+		return
+	}
+	vehicles, next, err := s.ListVehicles(r.Context(), scope, cursor, limit)
+	if err != nil {
+		platform.WriteError(w, err)
+		return
+	}
+	out := make([]vehicleResponse, 0, len(vehicles))
+	for i := range vehicles {
+		out = append(out, newVehicleResponse(&vehicles[i]))
+	}
+	resp := vehicleListResponse{Vehicles: out}
+	if next != nil {
+		encoded, err := EncodeVehicleCursor(*next)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		resp.NextCursor = &encoded
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // tenantIDFromClaims parses the tenant claim. A personal account (no
@@ -349,6 +448,37 @@ func vehicleIDFromRequest(r *http.Request) (uuid.UUID, error) {
 			platform.FieldError{Field: "vehicle_id", Issue: "must be a uuid"})
 	}
 	return vehicleID, nil
+}
+
+// listVehiclesPagination parses ?limit and the opaque ?cursor for the
+// registry listing. The defaults and the cap mirror Store.ListVehicles
+// semantics.
+func listVehiclesPagination(r *http.Request) (limit int, cursor *VehicleCursor, err error) {
+	query := r.URL.Query()
+	limit = defaultListLimit
+	if raw := query.Get("limit"); raw != "" {
+		n, parseErr := strconv.Atoi(raw)
+		if parseErr != nil {
+			return 0, nil, platform.ErrValidation("limit is not a number",
+				platform.FieldError{Field: "limit", Issue: "must be an integer"})
+		}
+		limit = n
+	}
+	if limit < 1 {
+		return 0, nil, platform.ErrValidation("limit must be positive",
+			platform.FieldError{Field: "limit", Issue: "must be at least 1"})
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
+	}
+	if raw := query.Get("cursor"); raw != "" {
+		c, parseErr := ParseVehicleCursor(raw)
+		if parseErr != nil {
+			return 0, nil, parseErr
+		}
+		cursor = &c
+	}
+	return limit, cursor, nil
 }
 
 // historyPagination parses ?limit and ?offset. The defaults and the cap
