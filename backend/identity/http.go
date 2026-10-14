@@ -152,6 +152,28 @@ type sessionListResponse struct {
 	Sessions []sessionResponse `json:"sessions"`
 }
 
+// auditRecordResponse is the API projection of one audit_log row (issue
+// #88). ActorID/TenantID render as null for system-originated or personal
+// rows — null is information, not an omission.
+type auditRecordResponse struct {
+	ID         int64          `json:"id"`
+	ActorID    *uuid.UUID     `json:"actor_id"`
+	Action     string         `json:"action"`
+	ObjectType string         `json:"object_type"`
+	ObjectID   string         `json:"object_id"`
+	TenantID   *uuid.UUID     `json:"tenant_id"`
+	Metadata   map[string]any `json:"metadata"`
+	CreatedAt  string         `json:"created_at"`
+}
+
+// auditListResponse is the GET /v1/admin/audit body: one page, newest
+// first, with the effective pagination echoed back.
+type auditListResponse struct {
+	Entries []auditRecordResponse `json:"entries"`
+	Limit   int                   `json:"limit"`
+	Offset  int                   `json:"offset"`
+}
+
 // revokedAllResponse is the DELETE /v1/auth/sessions body.
 type revokedAllResponse struct {
 	Revoked int `json:"revoked"`
@@ -227,6 +249,14 @@ func Routes(r chi.Router, svc *Service, limiter platform.AuthLimiter) {
 	r.Get("/v1/admin/users", platform.RequireRole(
 		[]string{string(RoleAdmin), string(RoleSuperAdmin)},
 		handleListUsers(svc),
+	))
+	// Admin audit read API (issue #88): the queryable, append-only
+	// audit trail. ADMIN and SUPER_ADMIN only; the caller's claims set
+	// the tenant scope inside the handler — query parameters cannot
+	// widen it.
+	r.Get("/v1/admin/audit", platform.RequireRole(
+		[]string{string(RoleAdmin), string(RoleSuperAdmin)},
+		handleListAudit(svc),
 	))
 }
 
@@ -403,15 +433,32 @@ func handleProfile(svc *Service) http.HandlerFunc {
 }
 
 // handleListUsers returns a paginated account listing for ADMIN and
-// SUPER_ADMIN callers (200).
+// SUPER_ADMIN callers (200). The privileged read is itself audited
+// (issue #88): the acting principal and their tenant scope come from the
+// validated claims, never from the request.
 func handleListUsers(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := platform.ClaimsFromContext(r.Context())
+		if !ok {
+			platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+			return
+		}
+		actorID, err := uuid.Parse(claims.UserID)
+		if err != nil {
+			platform.WriteError(w, platform.ErrUnauthorized("access token subject is invalid"))
+			return
+		}
 		limit, offset, err := paginationFromQuery(r)
 		if err != nil {
 			platform.WriteError(w, err)
 			return
 		}
-		users, err := svc.ListUsers(r.Context(), limit, offset)
+		tenantID, err := tenantIDFromClaims(claims)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		users, err := svc.ListUsersForAdmin(r.Context(), actorID, tenantID, limit, offset)
 		if err != nil {
 			platform.WriteError(w, err)
 			return
@@ -421,6 +468,129 @@ func handleListUsers(svc *Service) http.HandlerFunc {
 			out = append(out, newUserResponse(u))
 		}
 		writeJSON(w, http.StatusOK, userListResponse{Users: out, Limit: clampLimit(limit), Offset: clampOffset(offset)})
+	}
+}
+
+// tenantIDFromClaims parses the token's tenant claim for audit
+// attribution; a personal (tenant-less) principal yields nil. A malformed
+// tenant claim is an authentication failure, matching the vehicles
+// domain's posture — the scope is never derived from a claim that did not
+// parse.
+func tenantIDFromClaims(claims platform.Claims) (*uuid.UUID, error) {
+	if claims.TenantID == "" {
+		return nil, nil
+	}
+	tenant, err := uuid.Parse(claims.TenantID)
+	if err != nil {
+		return nil, platform.ErrUnauthorized("authenticated tenant claim is not a tenant identifier")
+	}
+	return &tenant, nil
+}
+
+// handleListAudit implements GET /v1/admin/audit (issue #88): one
+// filtered, paginated page of the append-only audit trail, newest first.
+// The tenant scope is derived from the validated claims (an ADMIN whose
+// claim carries a tenant is always filtered to it); SUPER_ADMIN may narrow
+// the platform-wide trail with ?tenant_id=. Filters: action, object_type,
+// object_id, actor_id, since/until (RFC 3339), limit/offset.
+func handleListAudit(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := platform.ClaimsFromContext(r.Context())
+		if !ok {
+			platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+			return
+		}
+		filter, err := auditFilterFromQuery(r, claims)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		records, err := svc.ListAudit(r.Context(), filter)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		entries := make([]auditRecordResponse, 0, len(records))
+		for _, rec := range records {
+			entries = append(entries, newAuditRecordResponse(rec))
+		}
+		writeJSON(w, http.StatusOK, auditListResponse{
+			Entries: entries,
+			Limit:   filter.Limit,
+			Offset:  filter.Offset,
+		})
+	}
+}
+
+// auditFilterFromQuery parses the audit read filters. The tenant scope
+// comes from the claims; only SUPER_ADMIN may pass an explicit ?tenant_id=
+// narrowing filter, and no caller can escape their own tenant constraint.
+func auditFilterFromQuery(r *http.Request, claims platform.Claims) (AuditFilter, error) {
+	limit, offset, err := paginationFromQuery(r)
+	if err != nil {
+		return AuditFilter{}, err
+	}
+	filter := AuditFilter{Limit: limit, Offset: offset}
+	q := r.URL.Query()
+	if raw := q.Get("tenant_id"); raw != "" && claims.Role == string(RoleSuperAdmin) {
+		tenant, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			return AuditFilter{}, platform.ErrValidation("tenant_id must be a UUID",
+				platform.FieldError{Field: "tenant_id", Issue: "invalid"})
+		}
+		filter.TenantID = &tenant
+	} else {
+		tenant, tenantErr := tenantIDFromClaims(claims)
+		if tenantErr != nil {
+			return AuditFilter{}, tenantErr
+		}
+		filter.TenantID = tenant
+	}
+	if raw := q.Get("actor_id"); raw != "" {
+		actor, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			return AuditFilter{}, platform.ErrValidation("actor_id must be a UUID",
+				platform.FieldError{Field: "actor_id", Issue: "invalid"})
+		}
+		filter.ActorID = &actor
+	}
+	filter.Action = strings.TrimSpace(q.Get("action"))
+	filter.ObjectType = strings.TrimSpace(q.Get("object_type"))
+	filter.ObjectID = strings.TrimSpace(q.Get("object_id"))
+	if raw := q.Get("since"); raw != "" {
+		since, parseErr := time.Parse(time.RFC3339, raw)
+		if parseErr != nil {
+			return AuditFilter{}, platform.ErrValidation("since must be an RFC 3339 timestamp",
+				platform.FieldError{Field: "since", Issue: "invalid"})
+		}
+		filter.Since = &since
+	}
+	if raw := q.Get("until"); raw != "" {
+		until, parseErr := time.Parse(time.RFC3339, raw)
+		if parseErr != nil {
+			return AuditFilter{}, platform.ErrValidation("until must be an RFC 3339 timestamp",
+				platform.FieldError{Field: "until", Issue: "invalid"})
+		}
+		filter.Until = &until
+	}
+	return filter, nil
+}
+
+// newAuditRecordResponse projects an AuditRecord onto the wire format.
+func newAuditRecordResponse(r AuditRecord) auditRecordResponse {
+	metadata := r.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	return auditRecordResponse{
+		ID:         r.ID,
+		ActorID:    r.ActorID,
+		Action:     r.Action,
+		ObjectType: r.ObjectType,
+		ObjectID:   r.ObjectID,
+		TenantID:   r.TenantID,
+		Metadata:   metadata,
+		CreatedAt:  r.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
 	}
 }
 

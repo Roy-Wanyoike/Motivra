@@ -27,6 +27,9 @@ type fakeStore struct {
 	verification       map[uuid.UUID]VerificationToken
 	verificationByHash map[string]uuid.UUID
 	audits             []AuditEntry
+	// auditTimes records each audit row's insertion time in lockstep
+	// with audits, backing the ListAudit read model (issue #88).
+	auditTimes []time.Time
 
 	failCreateUser bool
 	failAudit      bool
@@ -205,7 +208,70 @@ func (f *fakeStore) InsertAudit(_ context.Context, entry AuditEntry) error {
 		return errors.New("injected audit failure")
 	}
 	f.audits = append(f.audits, entry)
+	f.auditTimes = append(f.auditTimes, time.Now())
 	return nil
+}
+
+// ListAudit projects the recorded audit rows through the AuditFilter,
+// mirroring the SQL store's contract: exact-match constraints, tenant
+// equality, since/until window, newest first (reverse insertion order,
+// which matches created_at DESC for same-clock rows), offset pagination.
+func (f *fakeStore) ListAudit(_ context.Context, filter AuditFilter) ([]AuditRecord, error) {
+	filter.clamp()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	matched := make([]AuditRecord, 0, len(f.audits))
+	for i, a := range f.audits {
+		if filter.ActorID != nil && (a.ActorID == nil || *a.ActorID != *filter.ActorID) {
+			continue
+		}
+		if filter.Action != "" && a.Action != filter.Action {
+			continue
+		}
+		if filter.ObjectType != "" && a.ObjectType != filter.ObjectType {
+			continue
+		}
+		if filter.ObjectID != "" && a.ObjectID != filter.ObjectID {
+			continue
+		}
+		if filter.TenantID != nil && (a.TenantID == nil || *a.TenantID != *filter.TenantID) {
+			continue
+		}
+		at := f.auditTimes[i]
+		if filter.Since != nil && at.Before(*filter.Since) {
+			continue
+		}
+		if filter.Until != nil && !at.Before(*filter.Until) {
+			continue
+		}
+		metadata := a.Metadata
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		matched = append(matched, AuditRecord{
+			ID:         int64(i + 1),
+			ActorID:    a.ActorID,
+			Action:     a.Action,
+			ObjectType: a.ObjectType,
+			ObjectID:   a.ObjectID,
+			TenantID:   a.TenantID,
+			Metadata:   metadata,
+			CreatedAt:  at,
+		})
+	}
+	// Newest first: reverse insertion order, then offset-page.
+	for i, j := 0, len(matched)-1; i < j; i, j = i+1, j-1 {
+		matched[i], matched[j] = matched[j], matched[i]
+	}
+	if filter.Offset > len(matched) {
+		filter.Offset = len(matched)
+	}
+	matched = matched[filter.Offset:]
+	if filter.Limit < len(matched) {
+		matched = matched[:filter.Limit]
+	}
+	return matched, nil
 }
 
 // UpdatePassword replaces the user's stored password hash.
