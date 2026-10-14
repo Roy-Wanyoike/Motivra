@@ -17,6 +17,28 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+// PORT is the PaaS/container convention (platforms inject the listen port
+// as PORT). MOTIVRA_PORT must still win; PORT applies only when
+// MOTIVRA_PORT is unset; 8080 is the compose default.
+func TestLoadPortFallback(t *testing.T) {
+	t.Setenv("MOTIVRA_PORT", "")
+	t.Setenv("PORT", "3000")
+	if cfg := Load(); cfg.App.Port != "3000" {
+		t.Fatalf("PORT fallback not applied: port = %q", cfg.App.Port)
+	}
+
+	t.Setenv("MOTIVRA_PORT", "9090")
+	if cfg := Load(); cfg.App.Port != "9090" {
+		t.Fatalf("MOTIVRA_PORT must win over PORT: port = %q", cfg.App.Port)
+	}
+
+	t.Setenv("MOTIVRA_PORT", "")
+	t.Setenv("PORT", "")
+	if cfg := Load(); cfg.App.Port != "8080" {
+		t.Fatalf("default port not applied: port = %q", cfg.App.Port)
+	}
+}
+
 func TestLoadOverrides(t *testing.T) {
 	t.Setenv("MOTIVRA_APP_NAME", "identity")
 	t.Setenv("MOTIVRA_ENV", "production")

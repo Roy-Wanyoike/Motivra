@@ -115,7 +115,10 @@ func Load() Config {
 		App: AppConfig{
 			Name: envOr("MOTIVRA_APP_NAME", "motivra"),
 			Env:  env,
-			Port: envOr("MOTIVRA_PORT", "8080"),
+			// MOTIVRA_PORT wins; then PORT (the PaaS/container convention —
+			// platforms that inject a listen port always inject PORT);
+			// otherwise the 8080 compose default.
+			Port: envOr("MOTIVRA_PORT", envOr("PORT", "8080")),
 		},
 		Database: DatabaseConfig{URL: os.Getenv("MOTIVRA_DATABASE_URL")},
 		Redis:    RedisConfig{URL: os.Getenv("MOTIVRA_REDIS_URL")},
