@@ -136,12 +136,15 @@ func TestSessionReadsArePossessionScoped(t *testing.T) {
 
 	frank := registerPrincipal(t, router, "frank@isol.test")
 
-	// Sessions are addressed only by the opaque refresh token (an
-	// HMAC-SHA256 digest looked up in the store); there is no route that
-	// reads or revokes a session by id, so one principal cannot probe
-	// another's sessions even with a guessed identifier.
+	// Sessions are addressed by the opaque refresh token (an HMAC-SHA256
+	// digest looked up in the store) for rotation/logout. The issue #87
+	// session API does allow addressing a session by id, but only the
+	// caller's own (foreign and unknown ids answer the identical 404 —
+	// see sessions_api_test.go); the probed path here is not a route at
+	// all, and one principal cannot probe another's sessions even with a
+	// guessed identifier.
 	rec := getAuthed(t, router, "/v1/sessions/"+uuid.New().String(), frank.AccessToken)
-	require.Equal(t, http.StatusNotFound, rec.Code, "no route may address a session by id")
+	require.Equal(t, http.StatusNotFound, rec.Code, "/v1/sessions/ is not a routed prefix")
 
 	// Unknown refresh tokens answer the identical 401 on refresh and
 	// logout, so probing cannot distinguish unknown from foreign.
