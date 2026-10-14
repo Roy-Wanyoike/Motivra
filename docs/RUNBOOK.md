@@ -309,7 +309,11 @@ TLS at the edge, and monitoring attached.
 | Variable | Requirement |
 | --- | --- |
 | `POSTGRES_PASSWORD` | generated (`openssl rand -base64 24`) — compose refuses to boot without it |
-| `MOTIVRA_JWT_SECRET` | generated (`openssl rand -base64 48`), ≥32 bytes; validated in staging/production and the historical dev placeholder is refused everywhere |
+| `MOTIVRA_JWT_PRIVATE_KEY_FILE` | path to the Ed25519/RS256 signing PEM (compose mounts `./secrets/`). Provision once: `mkdir -p secrets && openssl genpkey -algorithm ed25519 -out secrets/jwtSigningKey.pem`. Identity is the sole issuer (ADR-0007); a missing key file refuses boot |
+| `MOTIVRA_JWT_SECRET` | generated (`openssl rand -base64 48`), ≥32 bytes; keys refresh-session digests (and the `MOTIVRA_JWT_ALLOW_HS256` migration window only). Validated in staging/production; the historical dev placeholder is refused everywhere |
+| Verifier key source (each verifying service) | `MOTIVRA_JWT_JWKS_URL` (compose default: `http://identity:8080/.well-known/jwks.json`) or `MOTIVRA_JWT_PUBLIC_KEY_FILE`; verifiers hold NO secret material (ADR-0007). HS256 verification requires the explicit `MOTIVRA_JWT_ALLOW_HS256=1` migration flag — retire before public launch |
+| `MOTIVRA_REDIS_URL` | set → the Redis-backed sliding-window rate limiter (cross-instance consistent, #87); unset → in-process limiter (single instance only) |
+| `MOTIVRA_PAYMENTS_WEBHOOK_SECRET` | REQUIRED outside development/test — HMAC secret for payment webhook signatures; register the public callback URL with the provider (owner action) |
 | `MOTIVRA_ENV` | `production` (enables the strict secret rules and OTEL-by-default) |
 | `MOTIVRA_OTEL_ENABLED` + `OTEL_EXPORTER_OTLP_ENDPOINT` | `true` + `otel-collector:4317` once the observability stack runs |
 | `MOTIVRA_TRUST_FORWARDED` | `true` only when a reverse proxy fronts the services; otherwise audit IPs and rate-limit keys are spoofable |
@@ -327,10 +331,12 @@ TLS at the edge, and monitoring attached.
 
 1. Review the diff of `.env` against `.env.example` — no committed values.
 2. `docker compose -f docker-compose.app.yml up -d` — services wait for
-   postgres health, then apply their own migration chains at boot.
+   postgres health (verifiers also wait for identity's JWKS), then apply
+   their own migration chains at boot.
 3. Attach monitoring: `docker compose -f docker-compose.observability.yml up -d`.
-4. Wait for all four `/readyz` to return 200 (compose healthchecks gate on
-   readiness).
+4. Wait for all six `/readyz` to return 200 (compose healthchecks gate on
+   readiness): identity :8081, vehicles :8082, jobs :8083, dispatch :8084,
+   payments :8085, inspections :8086.
 5. Run the §4a smoke checklist against `127.0.0.1:<port>` from the host.
 6. Verify **zero demo data**: `make integrity-check` and confirm
    `users`/`vehicles`/`jobs` counts match expectations for a fresh deploy
@@ -340,7 +346,7 @@ TLS at the edge, and monitoring attached.
 
 - All host ports are loopback-bound (#82). Put a reverse proxy (Caddy,
   nginx, or a cloud LB) on the host for TLS termination and forward to
-  `127.0.0.1:8081-8084`.
+  `127.0.0.1:8081-8086`.
 - The Vercel edge (for the customer web) carries HSTS preload and the
   security-header set; keep `vercel.json` and the proxy headers in sync.
   API paths are NOT served from Vercel — clients reach `/v1/*` on the
@@ -396,19 +402,54 @@ Post-deploy verification (run from a clean session, no Vercel cookies):
 
 ```sh
 # 1) No SSO redirect — expect HTTP 200 and cache HIT/MISS, never 302 to vercel.com/sso-api
-curl -sI https://motivra-youngsharksites.vercel.app/ | head -1
+curl -sI https://<CANONICAL-FRONTEND-DOMAIN>/ | head -1
 # 2) Landing content actually renders (static prerender — no function involved)
-curl -s https://motivra-youngsharksites.vercel.app/ | grep -o "<title>[^<]*</title>"
+curl -s https://<CANONICAL-FRONTEND-DOMAIN>/ | grep -o "<title>[^<]*</title>"
 # 3) Key routes exist
-curl -s -o /dev/null -w "%{http_code}\n" https://motivra-youngsharksites.vercel.app/login
+curl -s -o /dev/null -w "%{http_code}\n" https://<CANONICAL-FRONTEND-DOMAIN>/login
 ```
+
+### Canonical public URL (verified 2026-10-14) and domain hygiene
+
+The **only live, public, protection-free product surface** is:
+
+> **`https://motivra-bfj9.vercel.app/`** — customer web (Next.js, `apps/customer`);
+> verified `200` on `/`, `/login`, `/dashboard` with no SSO wall.
+
+Every other URL observed in 2026-10 testing is broken or misleading, and the
+root causes are **dashboard-side, not code-side**:
+
+| URL observed | Behavior | Explanation |
+| --- | --- | --- |
+| `motivra-bfj9.vercel.app` | `200` | the working production surface (see above) |
+| `motivra-youngsharksites.vercel.app` | `404 DEPLOYMENT_NOT_FOUND` | domain claimed by project `motivra` (team `youngsharksites`) but no production deployment currently assigned to it |
+| `motivra.vercel.app` | `500` | a DIFFERENT project with the same name on the personal team `roywanyoikes-projects` |
+| `motivra-rho.vercel.app` (and similar guesses) | `404 NOT_FOUND` | unclaimed domain — no project owns it; never existed |
+| `motivra-services-*` | `404` / `FUNCTION_INVOCATION_FAILED` | backend container on Vercel — unsupported target (see above) |
+
+**Root cause to fix in the Vercel dashboard:** the GitHub repo is connected
+to TWO Vercel teams at once (`youngsharksites` AND the personal
+`roywanyoikes-projects`). Consequences: duplicate projects with colliding
+names, deployments fired twice per commit (burning the Hobby plan's 100
+deployments/day quota — `api-deployments-free-per-day` failures), stale
+protected/dangling domains, and user-visible 404/500 pages on URLs that
+look authoritative. Owner actions:
+
+1. Disconnect the GitHub integration from ONE of the two teams (keep
+   `youngsharksites`; remove the personal account's `motivra` project).
+2. In the remaining team, keep ONE canonical frontend project and pin its
+   production domain (or attach a real custom domain) — then update the
+   probes above and this section's URL.
+3. Keep Deployment Protection disabled on the canonical production surface
+   (per the section above).
 
 ### Known deployment posture
 
 One shared Postgres cluster (ADR-0003) with per-domain migration chains;
-PostGIS required; Redis currently idle (rate limiting is in-process;
-Redis-backed distribution tracked in #87); Temporal intentionally absent
-from the stack yet.
+PostGIS required; Redis-backed distributed rate limiting active when
+`MOTIVRA_REDIS_URL` is set (issue #87); six services run their own
+migration chains at boot (identity, vehicles, jobs, dispatch, payments,
+inspections); Temporal intentionally absent from the stack yet.
 
 ---
 
