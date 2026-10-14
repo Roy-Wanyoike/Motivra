@@ -48,8 +48,9 @@ go run ./cmd/dispatch      # :8080  — stateless scoring (no DB client)
 
 Env names are the contract in `backend/platform/config.go`; copy
 `.env.example` for the full annotated list. Useful endpoints on every
-service: `GET /healthz` (liveness), `GET /readyz` (dependency checks),
-`GET /metrics` (Prometheus).
+service: `GET /healthz` (liveness), `GET /readyz` (dependency checks).
+Prometheus metrics live on a separate internal listener
+(`MOTIVRA_METRICS_ADDR`, default `:9090`) — never on the public API port.
 
 Stop the dev stack: `make dev-down`.
 

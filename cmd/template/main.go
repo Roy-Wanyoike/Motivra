@@ -60,7 +60,12 @@ func main() {
 		}
 		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
 	}
-	cleanups = append(cleanups, stopMetrics, stopTracing)
+	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metricsHandler)
+	if err != nil {
+		logger.Error("metrics listener unavailable", "error", err, "addr", cfg.MetricsAddr)
+		os.Exit(1)
+	}
+	cleanups = append(cleanups, stopMetricsSrv, stopMetrics, stopTracing)
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
 	opts = append(opts, platform.WithMiddleware(platform.AuthMiddleware(validator)))

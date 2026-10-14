@@ -308,12 +308,13 @@ func scanUser(row pgx.Row) (User, error) {
 }
 
 // CreateSession persists a new refresh session; created_at is set by the
-// database default.
+// database default. AbsoluteExpiresAt is explicit so rotation can carry the
+// predecessor's non-extendable bound forward (issue #81).
 func (s *PostgresStore) CreateSession(ctx context.Context, sess Session) error {
 	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO sessions (id, user_id, refresh_token_hash, device_name, ip_address, expires_at)
-                 VALUES ($1, $2, $3, $4, $5, $6)`,
-		sess.ID, sess.UserID, sess.RefreshTokenHash, sess.DeviceName, sess.IPAddress, sess.ExpiresAt,
+		`INSERT INTO sessions (id, user_id, refresh_token_hash, device_name, ip_address, expires_at, absolute_expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		sess.ID, sess.UserID, sess.RefreshTokenHash, sess.DeviceName, sess.IPAddress, sess.ExpiresAt, sess.AbsoluteExpiresAt,
 	); err != nil {
 		if platform.IsUniqueViolation(err) {
 			return platform.ErrConflict("session already exists")
@@ -328,9 +329,9 @@ func (s *PostgresStore) CreateSession(ctx context.Context, sess Session) error {
 func (s *PostgresStore) GetSessionByRefreshHash(ctx context.Context, hash string) (Session, error) {
 	var sess Session
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, refresh_token_hash, device_name, ip_address, expires_at, revoked_at
+		`SELECT id, user_id, refresh_token_hash, device_name, ip_address, expires_at, absolute_expires_at, revoked_at
                  FROM sessions WHERE refresh_token_hash = $1`, hash,
-	).Scan(&sess.ID, &sess.UserID, &sess.RefreshTokenHash, &sess.DeviceName, &sess.IPAddress, &sess.ExpiresAt, &sess.RevokedAt)
+	).Scan(&sess.ID, &sess.UserID, &sess.RefreshTokenHash, &sess.DeviceName, &sess.IPAddress, &sess.ExpiresAt, &sess.AbsoluteExpiresAt, &sess.RevokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Session{}, ErrUserNotFound

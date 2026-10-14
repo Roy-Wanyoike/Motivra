@@ -57,10 +57,21 @@ type TemporalConfig struct {
 // never issue tokens; issuance belongs exclusively to the identity service
 // (ADR-0004).
 type JWTConfig struct {
-	Secret   string // MOTIVRA_JWT_SECRET (>= 32 bytes in production)
+	Secret   string // MOTIVRA_JWT_SECRET (>= 32 bytes outside development/test)
 	Issuer   string // MOTIVRA_JWT_ISSUER
 	Audience string // MOTIVRA_JWT_AUDIENCE
 }
+
+// legacyDevJWTSecret is the historical development placeholder that used to
+// be baked into compose files and .env.example. It is PUBLIC (committed to
+// the repository at one point), so any deployment booting with it would sign
+// forgeable tokens. Validate refuses it in every environment except test.
+const legacyDevJWTSecret = "dev-only-insecure-jwt-secret-change-me-32b"
+
+// DefaultAbsoluteSessionTTL bounds the total lifetime of a refresh session:
+// rotation extends the idle expiry but never the absolute one (hardening
+// issue #81), so an actively-used session still ends after 90 days.
+const DefaultAbsoluteSessionTTL = 90 * 24 * time.Hour
 
 // OTelConfig controls OpenTelemetry export.
 type OTelConfig struct {
@@ -78,15 +89,32 @@ type Config struct {
 	JWT             JWTConfig
 	OTel            OTelConfig
 	ShutdownTimeout time.Duration // MOTIVRA_SHUTDOWN_TIMEOUT
+
+	// MetricsAddr is the listener for the internal Prometheus exposition
+	// (MOTIVRA_METRICS_ADDR, default ":9090"). Metrics are never served on
+	// the public API listener.
+	MetricsAddr string
+	// TrustForwarded honours X-Forwarded-For for client-IP resolution
+	// (MOTIVRA_TRUST_FORWARDED, default false). Enable ONLY when a trusted
+	// proxy (load balancer, ingress) is the only thing in front of the
+	// service; otherwise clients can spoof their IP.
+	TrustForwarded bool
+	// AuthRateLimitRPM caps authentication requests per minute per client
+	// IP (MOTIVRA_AUTH_RATE_LIMIT_RPM, default 60; 0 disables). Applied by
+	// the identity service to register/login/refresh/logout.
+	AuthRateLimitRPM int
 }
 
 // Load reads configuration from the process environment and applies
 // development-friendly defaults. Use Validate to enforce environment rules.
+// OTel export defaults to ON in production: a production deployment must not
+// silently run without telemetry (ADR-0005).
 func Load() Config {
+	env := envOr("MOTIVRA_ENV", EnvDevelopment)
 	return Config{
 		App: AppConfig{
 			Name: envOr("MOTIVRA_APP_NAME", "motivra"),
-			Env:  envOr("MOTIVRA_ENV", EnvDevelopment),
+			Env:  env,
 			Port: envOr("MOTIVRA_PORT", "8080"),
 		},
 		Database: DatabaseConfig{URL: os.Getenv("MOTIVRA_DATABASE_URL")},
@@ -103,16 +131,22 @@ func Load() Config {
 		},
 		OTel: OTelConfig{
 			Endpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-			Enabled:  envBool("MOTIVRA_OTEL_ENABLED", false),
+			Enabled:  envBool("MOTIVRA_OTEL_ENABLED", env == EnvProduction),
 		},
 		ShutdownTimeout: envDuration("MOTIVRA_SHUTDOWN_TIMEOUT", 15*time.Second),
+
+		MetricsAddr:      envOr("MOTIVRA_METRICS_ADDR", ":9090"),
+		TrustForwarded:   envBool("MOTIVRA_TRUST_FORWARDED", false),
+		AuthRateLimitRPM: envInt("MOTIVRA_AUTH_RATE_LIMIT_RPM", 60),
 	}
 }
 
 // Validate aggregates every configuration problem into a single error so an
 // operator sees all missing values at once instead of one boot failure at a
 // time. Rules: database URL required except in test; JWT secret required and
-// at least 32 bytes in production; port must be numeric in range.
+// at least 32 bytes in staging and production and refused when it is the
+// historical public development placeholder in every non-test environment;
+// port must be numeric in range.
 func (c Config) Validate() error {
 	var problems []string
 
@@ -127,14 +161,32 @@ func (c Config) Validate() error {
 	if port, err := strconv.Atoi(c.App.Port); err != nil || port < 1 || port > 65535 {
 		problems = append(problems, fmt.Sprintf("MOTIVRA_PORT %q is not a valid port", c.App.Port))
 	}
-	if c.App.Env == EnvProduction && len(c.JWT.Secret) < 32 {
-		problems = append(problems, "MOTIVRA_JWT_SECRET must be at least 32 bytes in production")
+	switch c.App.Env {
+	case EnvTest:
+		// Tests use fixed short secrets; no secret rules.
+	case EnvDevelopment:
+		// Development still refuses the PUBLIC placeholder: regenerating a
+		// local secret costs one openssl call, a forgeable-token deployment
+		// costs far more.
+		if c.JWT.Secret == legacyDevJWTSecret {
+			problems = append(problems, "MOTIVRA_JWT_SECRET must not be the historical development placeholder (generate one: openssl rand -base64 48)")
+		}
+	default: // staging, production
+		if len(c.JWT.Secret) < 32 {
+			problems = append(problems, fmt.Sprintf("MOTIVRA_JWT_SECRET must be at least 32 bytes in %s", c.App.Env))
+		}
+		if c.JWT.Secret == legacyDevJWTSecret {
+			problems = append(problems, "MOTIVRA_JWT_SECRET must not be the historical development placeholder")
+		}
 	}
 	if c.OTel.Enabled && c.OTel.Endpoint == "" {
 		problems = append(problems, "OTEL_EXPORTER_OTLP_ENDPOINT is required when OTEL tracing is enabled")
 	}
 	if c.ShutdownTimeout <= 0 {
 		problems = append(problems, "MOTIVRA_SHUTDOWN_TIMEOUT must be positive")
+	}
+	if c.AuthRateLimitRPM < 0 {
+		problems = append(problems, "MOTIVRA_AUTH_RATE_LIMIT_RPM must not be negative")
 	}
 
 	if len(problems) == 0 {
@@ -146,9 +198,11 @@ func (c Config) Validate() error {
 // LoadForTest returns a Config valid for unit tests (no database required).
 func LoadForTest() Config {
 	return Config{
-		App:             AppConfig{Name: "motivra-test", Env: EnvTest, Port: "8080"},
-		JWT:             JWTConfig{Secret: strings.Repeat("test-secret-", 4), Issuer: "motivra-identity", Audience: "motivra"},
-		ShutdownTimeout: 5 * time.Second,
+		App:              AppConfig{Name: "motivra-test", Env: EnvTest, Port: "8080"},
+		JWT:              JWTConfig{Secret: strings.Repeat("test-secret-", 4), Issuer: "motivra-identity", Audience: "motivra"},
+		ShutdownTimeout:  5 * time.Second,
+		MetricsAddr:      "",
+		AuthRateLimitRPM: 0, // tests exercise handlers directly; limiter off
 	}
 }
 
@@ -172,6 +226,15 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
+		}
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return fallback

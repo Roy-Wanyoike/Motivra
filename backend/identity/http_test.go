@@ -22,7 +22,7 @@ func newTestAPI() (http.Handler, *Service, *fakeStore, *platform.JWTValidator) {
 	validator := platform.NewJWTValidator(testSecret, testIssuer, testAudience)
 	cfg := platform.LoadForTest()
 	srv := platform.NewServer(cfg, platform.NewLogger(cfg.App), platform.WithMiddleware(platform.AuthMiddleware(validator)))
-	Routes(srv.Router, svc)
+	Routes(srv.Router, svc, nil)
 	return srv, svc, store, validator
 }
 
@@ -64,7 +64,29 @@ func TestRegisterEndpoint(t *testing.T) {
 	_, err := store.GetUserByEmail(t.Context(), "web.user@example.com")
 	require.NoError(t, err, "email stored lowercased")
 
-	// The client IP lands in the registration audit metadata.
+	// The client IP lands in the registration audit metadata. Default
+	// posture: X-Forwarded-For is untrusted, so the connection address is
+	// recorded (hardening issue #81); the trusted-proxy path is covered by
+	// TestRegisterAuditIPTrustedProxy.
+	entries := store.auditsByAction(ActionUserRegistered)
+	require.Len(t, entries, 1)
+	require.Equal(t, "192.0.2.1:1234", entries[0].Metadata["ip_address"])
+}
+
+// TestRegisterAuditIPTrustedProxy proves the opt-in X-Forwarded-For path:
+// behind WithTrustForwarded the forwarded hop is what reaches audit rows.
+func TestRegisterAuditIPTrustedProxy(t *testing.T) {
+	svc, store := newTestService()
+	svc.trustForwarded = true
+	validator := platform.NewJWTValidator(testSecret, testIssuer, testAudience)
+	cfg := platform.LoadForTest()
+	srv := platform.NewServer(cfg, platform.NewLogger(cfg.App), platform.WithMiddleware(platform.AuthMiddleware(validator)))
+	Routes(srv.Router, svc, nil)
+
+	rec := postJSON(t, srv, "/v1/auth/register",
+		`{"email":"proxy.user@example.com","password":"strong-passphrase","full_name":"Proxy User"}`)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
 	entries := store.auditsByAction(ActionUserRegistered)
 	require.Len(t, entries, 1)
 	require.Equal(t, "203.0.113.7", entries[0].Metadata["ip_address"])
@@ -210,12 +232,20 @@ func TestAdminListUsersEndpointRBAC(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-func TestClientIPPrefersForwardedFor(t *testing.T) {
+func TestClientIPForwardedForTrust(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
 	req.RemoteAddr = "10.0.0.1:5000"
 	req.Header.Set("X-Forwarded-For", "198.51.100.5, 10.0.0.2")
-	require.Equal(t, "198.51.100.5", clientIP(req))
+
+	// Default (direct exposure): the spoofable X-Forwarded-For header is
+	// ignored and the connection address wins (hardening issue #81).
+	untrusting := &Service{}
+	require.Equal(t, "10.0.0.1:5000", untrusting.clientIP(req))
+
+	// Behind a trusted proxy: the first forwarded hop wins.
+	trusting := &Service{trustForwarded: true}
+	require.Equal(t, "198.51.100.5", trusting.clientIP(req))
 
 	req.Header.Del("X-Forwarded-For")
-	require.Equal(t, "10.0.0.1:5000", clientIP(req))
+	require.Equal(t, "10.0.0.1:5000", trusting.clientIP(req))
 }

@@ -366,7 +366,7 @@ func canMutate(claims platform.Claims, v Vehicle) bool {
 // tenant or subject claim is an authentication failure.
 func scopeFromClaims(claims platform.Claims) (VehicleScope, error) {
 	if claims.Role == RoleAdmin || claims.Role == RoleSuperAdmin {
-		return VehicleScope{}, nil
+		return UnrestrictedScope(), nil
 	}
 	tenantID, err := tenantIDFromClaims(claims)
 	if err != nil {

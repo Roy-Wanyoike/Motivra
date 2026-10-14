@@ -19,15 +19,31 @@ import (
 // (ADR-0002); publisher may be nil (tests, offline tooling, deployments
 // without MOTIVRA_NATS_URL), in which case publishing is skipped.
 type Service struct {
-	store     SessionStore
-	issuer    *Issuer
-	publisher platform.Publisher
+	store          SessionStore
+	issuer         *Issuer
+	publisher      platform.Publisher
+	trustForwarded bool
 }
 
 // NewService builds a Service over the given store, token issuer and event
-// publisher.
-func NewService(store SessionStore, issuer *Issuer, publisher platform.Publisher) *Service {
-	return &Service{store: store, issuer: issuer, publisher: publisher}
+// publisher. Options tweak deployment-sensitive behaviour.
+func NewService(store SessionStore, issuer *Issuer, publisher platform.Publisher, opts ...ServiceOption) *Service {
+	s := &Service{store: store, issuer: issuer, publisher: publisher}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// ServiceOption customises a Service at construction.
+type ServiceOption func(*Service)
+
+// WithTrustForwarded makes client-IP resolution honour X-Forwarded-For.
+// Enable only behind a trusted proxy; direct exposure lets callers spoof
+// the IP recorded in audit rows and used as the rate-limit key (ADR-0004,
+// hardening issue #81).
+func WithTrustForwarded(trust bool) ServiceOption {
+	return func(s *Service) { s.trustForwarded = trust }
 }
 
 // emailPattern is a pragmatic RFC-5321-shaped address check: one local part,

@@ -360,7 +360,7 @@ func TestRecordMileageFailurePaths(t *testing.T) {
 	})
 
 	t.Run("decrease is 409", func(t *testing.T) {
-		require.NoError(t, svc.RecordMileage(context.Background(), uuid.MustParse(id), 2000, nil, VehicleScope{}))
+		require.NoError(t, svc.RecordMileage(context.Background(), uuid.MustParse(id), 2000, nil, UnrestrictedScope()))
 		w := do(t, h, http.MethodPost, "/v1/vehicles/"+id+"/mileage", token, []byte(`{"odometer_km":1999}`))
 		require.Equal(t, http.StatusConflict, w.Code)
 		assert.Equal(t, "conflict", decodeBody(t, w)["code"])

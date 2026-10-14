@@ -79,12 +79,16 @@ type userListResponse struct {
 	Offset int            `json:"offset"`
 }
 
-// clientIP resolves the caller IP for audit rows: X-Forwarded-For (first
-// hop added by our edge) wins, otherwise the connection RemoteAddr.
-func clientIP(r *http.Request) string {
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
-		if first := strings.SplitN(fwd, ",", 2)[0]; first != "" {
-			return strings.TrimSpace(first)
+// clientIP resolves the caller IP for audit rows and rate-limit keys.
+// X-Forwarded-For is honoured only when the service was built with
+// WithTrustForwarded (i.e. it sits behind a trusted proxy); otherwise the
+// header is attacker-controlled and the connection RemoteAddr is used.
+func (s *Service) clientIP(r *http.Request) string {
+	if s.trustForwarded {
+		if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
+			if first := strings.SplitN(fwd, ",", 2)[0]; first != "" {
+				return strings.TrimSpace(first)
+			}
 		}
 	}
 	return strings.TrimSpace(r.RemoteAddr)
@@ -106,11 +110,23 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // endpoints plus the protected profile and admin listing routes. Protected
 // routes rely on platform.AuthMiddleware having populated the request
 // context (mounted by the service binary) and enforce authn/authz here.
-func Routes(r chi.Router, svc *Service) {
-	r.Post("/v1/auth/register", handleRegister(svc))
-	r.Post("/v1/auth/login", handleLogin(svc))
-	r.Post("/v1/auth/refresh", handleRefresh(svc))
-	r.Post("/v1/auth/logout", handleLogout(svc))
+// limiter (optional) throttles the public auth endpoints per client IP —
+// argon2id verification is expensive, so unthrottled auth is also a
+// CPU/memory DoS vector (hardening issue #81). Pass nil to disable.
+func Routes(r chi.Router, svc *Service, limiter *platform.RateLimiter) {
+	throttle := func(h http.HandlerFunc) http.HandlerFunc { return h }
+	if limiter != nil {
+		limiterMW := limiter.Middleware(func(r *http.Request) string {
+			return svc.clientIP(r)
+		})
+		throttle = func(h http.HandlerFunc) http.HandlerFunc {
+			return limiterMW(h).ServeHTTP
+		}
+	}
+	r.Post("/v1/auth/register", throttle(handleRegister(svc)))
+	r.Post("/v1/auth/login", throttle(handleLogin(svc)))
+	r.Post("/v1/auth/refresh", throttle(handleRefresh(svc)))
+	r.Post("/v1/auth/logout", throttle(handleLogout(svc)))
 	r.Get("/v1/users/me", platform.RequireAuthenticated(handleProfile(svc)))
 	r.Get("/v1/admin/users", platform.RequireRole(
 		[]string{string(RoleAdmin), string(RoleSuperAdmin)},
@@ -126,7 +142,7 @@ func handleRegister(svc *Service) http.HandlerFunc {
 			platform.WriteError(w, err)
 			return
 		}
-		resp, err := svc.Register(r.Context(), req.Email, req.Phone, req.Password, req.FullName, req.DeviceName, clientIP(r))
+		resp, err := svc.Register(r.Context(), req.Email, req.Phone, req.Password, req.FullName, req.DeviceName, svc.clientIP(r))
 		if err != nil {
 			platform.WriteError(w, err)
 			return
@@ -144,7 +160,7 @@ func handleLogin(svc *Service) http.HandlerFunc {
 			platform.WriteError(w, err)
 			return
 		}
-		resp, err := svc.Login(r.Context(), req.Email, req.Password, req.DeviceName, clientIP(r))
+		resp, err := svc.Login(r.Context(), req.Email, req.Password, req.DeviceName, svc.clientIP(r))
 		if err != nil {
 			platform.WriteError(w, err)
 			return
