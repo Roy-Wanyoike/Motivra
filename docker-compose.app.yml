@@ -4,7 +4,7 @@
 #   docker compose -f docker-compose.app.yml up -d
 #
 # Distinct from docker-compose.dev.yml (dev dependencies only, `make dev`):
-# this file runs the FOUR Go services themselves, built from ./Dockerfile.
+# this file runs the SIX Go services themselves, built from ./Dockerfile.
 #
 # Data layer per ADR-0001/ADR-0003: PostgreSQL **with PostGIS** is the sole
 # source of truth (per-domain migration chains run at each service's boot
@@ -15,7 +15,15 @@
 #
 # Host port plan (chosen to coexist with docker-compose.dev.yml):
 #   postgres 5433, redis 6380, nats 4223 (client) / 8223 (monitoring),
-#   identity 8081, vehicles 8082, jobs 8083, dispatch 8084.
+#   identity 8081, vehicles 8082, jobs 8083, dispatch 8084,
+#   payments 8085, inspections 8086.
+#
+# JWT posture (ADR-0007, issue #87): identity is the only issuer — it loads
+# its Ed25519/RS256 private key from a mounted PEM and serves the JWKS at
+# /.well-known/jwks.json. Verifying services hold NO secret material; they
+# verify via MOTIVRA_JWT_JWKS_URL. Provision the signing key once:
+#   mkdir -p secrets && openssl genpkey -algorithm ed25519 -out secrets/jwtSigningKey.pem
+# A missing key file refuses identity's boot by design (fail-fast, no fake).
 
 name: motivra-app
 
@@ -44,12 +52,6 @@ services:
       retries: 10
     mem_limit: 1g
     cpus: 1.0
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -69,12 +71,6 @@ services:
       retries: 10
     mem_limit: 256m
     cpus: 0.5
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -96,12 +92,6 @@ services:
       retries: 10
     mem_limit: 256m
     cpus: 0.5
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -122,12 +112,17 @@ services:
       MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
+      # ADR-0007: identity is the sole signer. MOTIVRA_JWT_SECRET here keys
+      # refresh-session digests only — access tokens are EdDSA/RS256-signed.
+      MOTIVRA_JWT_PRIVATE_KEY_FILE: /secrets/jwtSigningKey.pem
+      MOTIVRA_JWT_KEY_ID: ${MOTIVRA_JWT_KEY_ID:-identity-1}
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
       MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    volumes:
+      - ./secrets:/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -159,7 +154,8 @@ services:
       MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
+      # ADR-0007: verifiers hold NO signing/secret material — JWKS only.
+      MOTIVRA_JWT_JWKS_URL: http://identity:8080/.well-known/jwks.json
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -167,6 +163,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       postgres:
+        condition: service_healthy
+      identity:
         condition: service_healthy
     ports:
       - "127.0.0.1:8082:8080"
@@ -196,7 +194,8 @@ services:
       MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
+      # ADR-0007: verifiers hold NO signing/secret material — JWKS only.
+      MOTIVRA_JWT_JWKS_URL: http://identity:8080/.well-known/jwks.json
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -204,6 +203,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       postgres:
+        condition: service_healthy
+      identity:
         condition: service_healthy
     ports:
       - "127.0.0.1:8083:8080"
@@ -236,16 +237,105 @@ services:
       MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
+      # ADR-0007: verifiers hold NO signing/secret material — JWKS only.
+      MOTIVRA_JWT_JWKS_URL: http://identity:8080/.well-known/jwks.json
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
       MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      identity:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8084:8080"
     mem_limit: 256m
     cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  payments:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: payments
+    image: motivra/payments:local
+    environment:
+      MOTIVRA_APP_NAME: payments
+      MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
+      MOTIVRA_PORT: "8080"
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_REDIS_URL: redis://redis:6379/0
+      MOTIVRA_NATS_URL: nats://nats:4222
+      # ADR-0007: verifiers hold NO signing/secret material — JWKS only.
+      MOTIVRA_JWT_JWKS_URL: http://identity:8080/.well-known/jwks.json
+      MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
+      MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
+      # Sandbox provider is the safe default; Daraja needs owner credentials
+      # (see backend/payments/README.md — partial Daraja config refuses boot).
+      MOTIVRA_PAYMENTS_PROVIDER: ${MOTIVRA_PAYMENTS_PROVIDER:-sandbox}
+      MOTIVRA_PAYMENTS_WEBHOOK_SECRET: ${MOTIVRA_PAYMENTS_WEBHOOK_SECRET:-}
+      MOTIVRA_PAYMENTS_RECONCILE_INTERVAL: ${MOTIVRA_PAYMENTS_RECONCILE_INTERVAL:-1m}
+      MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
+      MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      identity:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8085:8080"
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - motivra
+
+  inspections:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: inspections
+    image: motivra/inspections:local
+    environment:
+      MOTIVRA_APP_NAME: inspections
+      MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
+      MOTIVRA_PORT: "8080"
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_REDIS_URL: redis://redis:6379/0
+      MOTIVRA_NATS_URL: nats://nats:4222
+      # ADR-0007: verifiers hold NO signing/secret material — JWKS only.
+      MOTIVRA_JWT_JWKS_URL: http://identity:8080/.well-known/jwks.json
+      MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
+      MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
+      MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
+      MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      identity:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8086:8080"
+    mem_limit: 512m
+    cpus: 1.0
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
       interval: 15s

@@ -26,11 +26,12 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 - Append-only service history; Vehicle Passport read model
 - **Exit criteria:** passport assembles from history without mutation; provenance recorded
 
-## Wave 3 — Inspection
+## Wave 3 — Inspection (BACKEND CORE MERGED — PR #102; media storage adapter follow-up)
 
 - Dynamic inspection templates; offline inspection capture; media evidence (S3)
 - Findings with severity (GREEN/AMBER/RED); verified report generation
 - Pre-purchase inspection flow (Motivra Inspect wedge)
+- **Status:** `/backend/inspections` shipped (PR #102): template registry, session state machine, GREEN/AMBER/RED findings, evidence provenance (content hashes), append-only verified reports, `motivra.inspections.*.v1` events, OpenAPI contract, migrations 000001-000005. Evidence records reference hashes; the S3/storage adapter and mobile capture UI remain open.
 - **Exit criteria:** inspector completes an inspection offline; report verifies against evidence
 
 ## Wave 4 — Mobile garage (BACKEND CORE MERGED — PRs #21, #20; web foundation merged — PR #35; mobile foundation + full conflict protocol merged — PRs #43, #59)
@@ -41,11 +42,12 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 - Customer web (Next.js): request → live status → approval → history
 - **Exit criteria:** E2E happy path passes: request → dispatch → inspect → estimate → approve → repair
 
-## Wave 5 — Money
+## Wave 5 — Money (FOUNDATION MERGED — PR #109; warranties + partial refunds follow-up)
 
 - Payment provider abstraction; M-Pesa first, card/bank/wallet behind it
 - Ledger in integer minor units; idempotency, webhooks, reconciliation, retries, refunds
 - Warranties on completed work
+- **Status:** `/backend/payments` shipped (PR #109): Provider abstraction with deterministic sandbox + M-Pesa Daraja adapters, int64-KES ledger, exactly-once idempotent webhooks, reconciliation sweep, full refunds, migrations, OpenAPI contract. Live Daraja credentials, callback registration, partial refunds and warranties remain open (owner actions documented in backend/payments/README.md).
 - **Exit criteria:** payment success/failure/reconciliation all observable; no floating-point money anywhere
 
 ## Wave 6 — Network
@@ -72,6 +74,7 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 
 - Security audit vs the model in ARCHITECTURE.md §5; SAST/DAST/chaos testing
 - Load testing on hot paths (service creation, dispatch, location updates)
+- **Status:** crypto & scale landed early (issue #87, PR #110): asymmetric Ed25519/RS256 signing with JWKS + two-phase kid rotation (ADR-0007), Redis-backed distributed rate limiting, session management API. Audit coverage expansion landed (issue #88, PR #111): dispatch decision records, admin audit read API, OTel exception events, jobs tenant_id scoping. HIBP breach checks + email/phone verification landed (issue #86, PR #98). SAST/DAST/chaos and load testing remain open.
 - **Exit criteria:** SLOs measured and met on staging at production-shaped load
 
 ## Wave 10 — Production

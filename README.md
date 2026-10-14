@@ -109,7 +109,7 @@ Warranty + service report + Vehicle Passport update + maintenance recommendation
 
 ### Honest status
 
-This repository was bootstrapped in **September 2026**. It is at the very beginning: architecture and engineering governance land first, then implementation waves (see [Roadmap](#roadmap)). We hold ourselves to a no-vanity-metrics policy — when numbers appear in this README, they will be real customers, real jobs, real revenue, real retention. Until then, judge us on the architecture, the process discipline, and the quality of what we ship. We expect to be judged that way after launch, too.
+This repository was bootstrapped in **September 2026**. Six backend bounded contexts are implemented and tested end-to-end — platform, identity (breach checks, verification, sessions, asymmetric signing), vehicles, jobs, dispatch (explainable scoring, decision audit), inspections (evidence provenance, verified reports) and payments (integer ledger, idempotent webhooks, reconciliation) — with the customer web (Next.js) deployed and the full compose stack runnable locally. There are still no customers, so the rule stands: We hold ourselves to a no-vanity-metrics policy — when numbers appear in this README, they will be real customers, real jobs, real revenue, real retention. Until then, judge us on the architecture, the process discipline, and the quality of what we ship. We expect to be judged that way after launch, too.
 
 ---
 
