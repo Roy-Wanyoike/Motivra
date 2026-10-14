@@ -4,21 +4,22 @@ info:
   version: 1.0.0
   description: |
     Authentication and account management for Motivra (ADR-0004 security
-    baseline). Access tokens are short-lived HS256 JWTs (15 minutes) issued
-    by this service; refresh tokens are opaque 256-bit strings (30 days,
-    rotated on every use, stored only as keyed HMAC-SHA256 digests). New
-    passwords are checked against breach corpora before hashing (ADR-0004,
-    issue #86); accounts verify their email/phone channels through
-    single-use tokens, and refresh sessions are refused once the
-    post-registration grace window ends until every present channel is
-    verified. All error responses use RFC 7807-style application/problem+json
-    bodies.
+    baseline). Access tokens are short-lived asymmetric JWTs (EdDSA/RS256,
+    15 minutes, ADR-0007) issued by this service; verifying services hold
+    the public keys only, via /.well-known/jwks.json. Refresh tokens are
+    opaque 256-bit strings (30 days, rotated on every use, stored only as
+    keyed HMAC-SHA256 digests). New passwords are checked against breach
+    corpora before hashing (ADR-0004, issue #86); accounts verify their
+    email/phone channels through single-use tokens, and refresh sessions
+    are refused once the post-registration grace window ends until every
+    present channel is verified. All error responses use RFC 7807-style
+    application/problem+json bodies.
 servers:
   - url: /
     description: Same-origin deployment behind the platform gateway.
 tags:
   - name: auth
-    description: Token issuance, rotation and revocation.
+    description: Token issuance, rotation, revocation and refresh-session management.
   - name: users
     description: Authenticated account access and admin listing.
 paths:
@@ -294,6 +295,128 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /v1/auth/sessions:
+    get:
+      operationId: listSessions
+      tags: [auth]
+      summary: List the authenticated caller's refresh sessions
+      description: >
+        Every refresh session of the caller — including revoked ones, which
+        render as "signed out" devices. The session behind the presented
+        access token carries current=true. Responses never contain
+        credential material (refresh tokens are stored only as digests).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The caller's sessions, newest-first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionList'
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    delete:
+      operationId: revokeAllSessions
+      tags: [auth]
+      summary: Revoke every live session of the caller (sign-out everywhere)
+      description: >
+        Revokes all of the caller's live refresh sessions, including the
+        session behind the presented access token. Refresh rotation and
+        login with an existing device token are refused afterwards; the
+        still-valid access token expires within one access TTL. Audited
+        (identity.session.revoked_all) with the revoked count.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Number of sessions revoked by this call.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeAllResponse'
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/auth/sessions/{sessionID}:
+    delete:
+      operationId: revokeSession
+      tags: [auth]
+      summary: Revoke one of the caller's refresh sessions by id
+      description: >
+        Revokes the named refresh session (204). Unknown ids and other
+        users' sessions yield the identical 404 — ownership is scoped in
+        the service layer and session existence is never disclosed across
+        accounts. Audited (identity.session.revoked).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Session revoked.
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: No session with this id belongs to the caller.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: sessionID is not a UUID.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /.well-known/jwks.json:
+    get:
+      operationId: getJWKS
+      tags: [auth]
+      summary: The issuer's public signing keys (JWKS, ADR-0007)
+      description: >
+        JSON Web Key Set of the asymmetric signing keys (EdDSA/RS256) — the
+        only trust anchor verifying services need. Carries public material
+        only. Validators cache it (5-minute refresh, bounded unknown-kid
+        refetch) and pick up rotated kids without restarts; the rotation
+        procedure is RUNBOOK §8a.
+      responses:
+        '200':
+          description: The current key set (RFC 7517 JWK Set).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    description: Public JWKs, each with kid/kty/alg/crv or n&e/use.
+                    items:
+                      type: object
+                      additionalProperties: true
+        '404':
+          description: Legacy HS256 signing is configured (no asymmetric key set exists).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /v1/users/me:
     get:
       operationId: getProfile
@@ -376,7 +499,9 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: HS256 access token issued by /v1/auth/login or /v1/auth/register.
+      description: Access token issued by /v1/auth/login or /v1/auth/register —
+        asymmetric EdDSA/RS256 with a kid header (ADR-0007); HS256 exists only
+        behind the explicit MOTIVRA_JWT_ALLOW_HS256 migration flag.
   schemas:
     AccessResponse:
       type: object
@@ -384,7 +509,7 @@ components:
       properties:
         access_token:
           type: string
-          description: HS256 JWT (15 minutes) carrying sub, tenant_id, role, roles, sid, iss, aud, iat, exp.
+          description: Asymmetric JWT (EdDSA/RS256, 15 minutes, ADR-0007) carrying sub, tenant_id, role, roles, sid, iss, aud, iat, exp and a kid header; verifiers check it against the issuer's JWKS.
         refresh_token:
           type: string
           description: Opaque 256-bit base64url token (30 days), rotated on every refresh.
@@ -562,6 +687,52 @@ components:
           type: integer
         offset:
           type: integer
+    SessionInfo:
+      type: object
+      description: One refresh session of the caller (credential-free projection).
+      required: [id, device_name, ip_address, created_at, expires_at, absolute_expires_at, current]
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        ip_address:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          description: Idle expiry, extended by refresh rotation (never past absolute_expires_at).
+        absolute_expires_at:
+          type: string
+          format: date-time
+          description: Hard cap set at first login (ADR-0004 hardening, issue #81).
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the session was revoked (logout, password change, revoke-all); null while live.
+        current:
+          type: boolean
+          description: True for the session behind the presented access token.
+    SessionList:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionInfo'
+    RevokeAllResponse:
+      type: object
+      required: [revoked]
+      properties:
+        revoked:
+          type: integer
+          description: Number of live sessions revoked by this call.
     Problem:
       type: object
       description: RFC 7807-style error (application/problem+json).

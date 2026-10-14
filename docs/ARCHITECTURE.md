@@ -103,3 +103,4 @@ Architecture decision records are the normative layer above this document: when 
 | [ADR-0004](adr/0004-security-baseline.md) | Security Baseline — AuthN, AuthZ, Tenant Isolation, Money Integrity | Accepted |
 | [ADR-0005](adr/0005-observability-and-slos.md) | Observability Baseline and Initial SLOs | Accepted |
 | [ADR-0006](adr/0006-license-and-contributions.md) | License and Contribution Intake (Apache-2.0 + DCO) | Accepted |
+| [ADR-0007](adr/0007-asymmetric-jwt-signing.md) | Asymmetric JWT Signing with JWKS (EdDSA/RS256), `kid` Rotation and the Verifier Posture | Accepted |

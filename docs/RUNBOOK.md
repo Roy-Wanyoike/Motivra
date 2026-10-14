@@ -62,13 +62,15 @@ The integration suites are gated behind environment variables and skip automatic
 |---|---|
 | Store integration tests via `backend/platform/pgtest` (identity, jobs, vehicles) | `TEST_DATABASE_URL` |
 | Platform NATS end-to-end publish test | `TEST_NATS_URL` |
+| Redis sliding-window limiter tests via `backend/platform/redistest` (issue #87: allow/reject, cross-instance consistency, 429 middleware) | `TEST_REDIS_URL` |
 
 Run them against the local dev stack:
 
 ```bash
-make dev                                                            # postgres on 5432, nats client on 4222
+make dev                                                            # postgres on 5432, nats client on 4222, redis on 6379
 export TEST_DATABASE_URL='postgres://motivra:motivra@localhost:5432/motivra?sslmode=disable'
 export TEST_NATS_URL='nats://localhost:4222'
+export TEST_REDIS_URL='redis://localhost:6379/0'
 go test ./backend/...
 ```
 
@@ -424,7 +426,8 @@ the database is not a backup.
 
 | Secret | Rotation trigger | Procedure | Impact |
 | --- | --- | --- | --- |
-| `MOTIVRA_JWT_SECRET` | quarterly, suspected compromise, team change | generate new 48-byte secret; update `.env`; rolling restart of all services during a low-traffic window | all access tokens die within one access TTL (15 min); refresh sessions remain valid (digests are keyed with the OLD secret — for full session invalidation rotate and purge sessions via §5a) |
+| JWT signing key (`MOTIVRA_JWT_PRIVATE_KEY_FILE`, ADR-0007) | quarterly, suspected compromise, kid retirement | §8a procedure below (two-phase `kid` rotation; compromise = drop the kid immediately) | access tokens signed by the retired key are refused within one access TTL (15 min) of the kid leaving the JWKS; refresh sessions unaffected (opaque, unsigned) |
+| `MOTIVRA_JWT_SECRET` | quarterly, suspected compromise, team change | generate new 48-byte secret; update `.env`; rolling restart of identity during a low-traffic window | since ADR-0007 the secret no longer signs access tokens (EdDSA does) — ALL refresh sessions die (digests are HMAC'd with the secret; every lookup misses), users re-authenticate; purge orphaned session rows via §5a. Verifiers no longer hold the secret at all; it keys refresh digests and the `MOTIVRA_JWT_ALLOW_HS256` migration path only |
 | `POSTGRES_PASSWORD` | quarterly, suspected compromise | change in Postgres (`ALTER USER`), update `.env`, restart the stack | brief downtime during restart |
 | TLS certificates | expiry | proxy-managed (ACME) | none if automated |
 | GitHub PAT | immediately on any exposure | regenerate in GitHub settings, update deploy secrets | CI/deploy pause until updated |
@@ -432,6 +435,31 @@ the database is not a backup.
 Compromise-specific: after any suspected secret leak, rotate FIRST
 (sessions/tokens die), then investigate with §9 — never investigate on
 possibly-compromised credentials.
+
+### 8a. JWT signing-key (`kid`) and JWKS rotation (ADR-0007, issue #87)
+
+Signing is asymmetric: identity signs with Ed25519/RS256; verifying services
+hold public keys only — the JWKS at `/.well-known/jwks.json` and/or a
+distributed public-key file — selected by the token's `kid`. Rotation needs
+no restarts and no secret synchronization.
+
+**Two-phase rotation (planned, zero downtime):**
+
+1. **Introduce the new key.** Provision the new PEM (`MOTIVRA_JWT_PRIVATE_KEY_FILE`, new derived or explicit `MOTIVRA_JWT_KEY_ID`) and restart identity while the JWKS still serves BOTH kids. Verifiers pick the new kid up on first sighting (unknown-kid refetch, bounded to ≤1 fetch/second per instance; first fetch always bypasses the bound). New logins/refreshes now mint new-kid tokens.
+2. **Retire the old kid.** After one access TTL (15 min default) every token in the wild is signed by the new key — remove the old key from the served set. Old-key tokens fail at the next validation, so **old tokens are invalid within one access TTL of completing phase 1**. Refresh sessions keep working (opaque tokens are not signed).
+
+**Compromise (skip phase 1):** drop the compromised kid from the JWKS/key set
+immediately — its tokens die at every verifier's next validation, well within
+one access TTL; then rotate `MOTIVRA_JWT_SECRET` per §8 (refresh sessions
+must die too) and follow §9.
+
+**JWKS fetch cadence (what verifiers do automatically):**
+
+- cache warms at boot and `/readyz` probes the `jwks` checker — a red `/readyz` on a verifier means its JWKS fetch is failing;
+- whole-set refresh every 5 minutes (`jwksCacheTTL`); unknown-kid refetch bounded to 1/second (`jwksMinRefreshGap`) — forged-`kid` floods cannot amplify into the issuer;
+- on JWKS outage verifiers serve the stale key set (auth keeps working) while `/readyz` goes red — restore the endpoint, no restart needed.
+
+**Verify a rotation:** list the served kids (`curl .../.well-known/jwks.json | jq '.keys[].kid'` — expect both kids in phase 1, only the new kid in phase 2), confirm verifier logs show no `unknown kid` errors, and confirm `rate_limit_decisions_total`/auth metrics stay flat (no rejection spike beyond the expected old-key tail).
 
 ---
 
