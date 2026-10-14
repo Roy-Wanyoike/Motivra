@@ -100,17 +100,22 @@ cp .env.example .env        # optional; adjust secrets before any shared use
 make stack-up               # = docker compose -f docker-compose.app.yml up -d
 ```
 
-Host ports (chosen to coexist with `make dev`):
+Host ports (chosen to coexist with `make dev`). **All host bindings are
+loopback-only (`127.0.0.1`)**: reachable from the host for local workflows
+(`make seed`, curls) but never exposed on external interfaces when the
+stack runs on a server — front the API ports with a reverse proxy/TLS
+instead (issue #82). App services also get compose readiness healthchecks
+(`/readyz`) and memory/CPU limits:
 
 | Service | Host : container | Notes |
 | --- | --- | --- |
-| postgres (PostGIS) | `5433 : 5432` | `pg_isready` healthcheck |
-| redis | `6380 : 6379` | |
-| nats | `4223 : 4222`, `8223 : 8222` | JetStream `-js`; monitor `-m 8222` |
-| identity | `8081 : 8080` | healthcheck `/healthz` |
-| vehicles | `8082 : 8080` | healthcheck `/healthz` |
-| jobs | `8083 : 8080` | healthcheck `/healthz` |
-| dispatch | `8084 : 8080` | stateless; no DB client |
+| postgres (PostGIS) | `127.0.0.1:5433 : 5432` | `pg_isready` healthcheck |
+| redis | `127.0.0.1:6380 : 6379` | |
+| nats | `127.0.0.1:4223 : 4222`, `127.0.0.1:8223 : 8222` | JetStream `-js`; monitor `-m 8222` |
+| identity | `127.0.0.1:8081 : 8080` | readiness `/readyz` |
+| vehicles | `127.0.0.1:8082 : 8080` | readiness `/readyz` |
+| jobs | `127.0.0.1:8083 : 8080` | readiness `/readyz` |
+| dispatch | `127.0.0.1:8084 : 8080` | stateless; no DB client |
 
 First boot takes a minute: each service waits for postgres health, then
 applies its own migration chain inside the shared `motivra` database.
