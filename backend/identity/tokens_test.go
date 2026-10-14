@@ -23,7 +23,10 @@ func newTestIssuer() *Issuer {
 	return NewIssuer(testSecret, testIssuer, testAudience)
 }
 
-// testUser returns a user with the given roles.
+// testUser returns a user with the given roles. CreatedAt is stamped "now"
+// because every production account row carries a creation timestamp — and
+// the issue #86 verification-grace gate measures that field, so a zero
+// CreatedAt would wrongly read as an account from year one.
 func testUser(roles ...Role) User {
 	return User{
 		ID:           uuid.New(),
@@ -32,13 +35,15 @@ func testUser(roles ...Role) User {
 		PasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		Status:       StatusActive,
 		Roles:        roles,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 }
 
 // requireUnauthorized asserts err renders as an HTTP 401 application error.
-func requireUnauthorized(t *testing.T, err error) {
+func requireUnauthorized(t *testing.T, err error, msgAndArgs ...any) {
 	t.Helper()
-	require.Error(t, err)
+	require.Error(t, err, msgAndArgs...)
 	appErr := platform.AsError(err)
 	require.Equal(t, 401, appErr.Status)
 }

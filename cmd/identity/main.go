@@ -65,8 +65,33 @@ func main() {
 	}
 
 	store := identity.NewPostgresStore(pool)
-	issuer := identity.NewIssuer(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
-	svc := identity.NewService(store, issuer, publisher, identity.WithTrustForwarded(cfg.TrustForwarded))
+
+	// Breached-password check (ADR-0004, issue #86): the local denylist
+	// always applies; HIBP k-anonymity joins the chain when
+	// MOTIVRA_HIBP_ENABLED is set. An unreadable denylist file refuses
+	// boot — an operator-provided corpus must not silently vanish.
+	breachCfg := identity.LoadBreachConfig()
+	breacher, err := identity.NewBreacher(breachCfg)
+	if err != nil {
+		logger.Error("breach denylist unavailable", "error", err)
+		os.Exit(1)
+	}
+
+	// Email/phone verification flow (issue #86): grace window, token TTL,
+	// resend limits and the dev-only token echo, validated before boot.
+	verificationCfg := identity.LoadVerificationConfig()
+	if err := verificationCfg.Validate(cfg.App.Env); err != nil {
+		logger.Error("configuration invalid", "error", err)
+		os.Exit(1)
+	}
+
+	issuer := identity.NewIssuer(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience,
+		identity.WithVerificationGrace(verificationCfg.Grace))
+	svc := identity.NewService(store, issuer, publisher,
+		identity.WithTrustForwarded(cfg.TrustForwarded),
+		identity.WithPasswordBreacher(breacher, breachCfg.FailClosed),
+		identity.WithVerification(verificationCfg),
+	)
 	// Per-IP throttle on the public auth endpoints (0 disables; off in tests).
 	var authLimiter *platform.RateLimiter
 	if cfg.AuthRateLimitRPM > 0 {

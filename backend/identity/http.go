@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -43,16 +44,49 @@ type logoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// verifyRequest is the POST /v1/auth/verify body. The single-use token is
+// the credential; the endpoint is public because verification links are
+// clicked without a session (issue #86).
+type verifyRequest struct {
+	Token string `json:"token"`
+}
+
+// resendVerificationRequest is the POST /v1/auth/verification/resend body.
+// Channel defaults to email; phone resends apply to accounts with a phone.
+type resendVerificationRequest struct {
+	Email   string              `json:"email"`
+	Channel VerificationChannel `json:"channel,omitempty"`
+}
+
+// changePasswordRequest is the POST /v1/auth/password body (issue #86).
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
 // userResponse is the API projection of a user: credential material is
-// never serialized.
+// never serialized. The verification timestamps let clients render the
+// "verify your account" state without a second endpoint (issue #86).
 type userResponse struct {
-	ID        uuid.UUID `json:"id"`
-	Email     string    `json:"email"`
-	Phone     string    `json:"phone"`
-	FullName  string    `json:"full_name"`
-	Status    string    `json:"status"`
-	Roles     []string  `json:"roles"`
-	CreatedAt string    `json:"created_at"`
+	ID              uuid.UUID `json:"id"`
+	Email           string    `json:"email"`
+	Phone           string    `json:"phone"`
+	FullName        string    `json:"full_name"`
+	Status          string    `json:"status"`
+	Roles           []string  `json:"roles"`
+	EmailVerifiedAt *string   `json:"email_verified_at"`
+	PhoneVerifiedAt *string   `json:"phone_verified_at"`
+	CreatedAt       string    `json:"created_at"`
+}
+
+// formatTimePtr projects an optional timestamp onto the wire format used
+// for created_at (nil stays null).
+func formatTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	formatted := t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	return &formatted
 }
 
 // newUserResponse projects a User onto the wire format.
@@ -62,13 +96,15 @@ func newUserResponse(u User) userResponse {
 		roles = append(roles, string(r))
 	}
 	return userResponse{
-		ID:        u.ID,
-		Email:     u.Email,
-		Phone:     u.Phone,
-		FullName:  u.FullName,
-		Status:    u.Status,
-		Roles:     roles,
-		CreatedAt: u.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+		ID:              u.ID,
+		Email:           u.Email,
+		Phone:           u.Phone,
+		FullName:        u.FullName,
+		Status:          u.Status,
+		Roles:           roles,
+		EmailVerifiedAt: formatTimePtr(u.EmailVerifiedAt),
+		PhoneVerifiedAt: formatTimePtr(u.PhoneVerifiedAt),
+		CreatedAt:       u.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
 	}
 }
 
@@ -127,6 +163,12 @@ func Routes(r chi.Router, svc *Service, limiter *platform.RateLimiter) {
 	r.Post("/v1/auth/login", throttle(handleLogin(svc)))
 	r.Post("/v1/auth/refresh", throttle(handleRefresh(svc)))
 	r.Post("/v1/auth/logout", throttle(handleLogout(svc)))
+	// Verification flow (issue #86): public token consumption and resend.
+	r.Post("/v1/auth/verify", throttle(handleVerify(svc)))
+	r.Post("/v1/auth/verification/resend", throttle(handleVerificationResend(svc)))
+	// Authenticated password change (issue #86); throttled before the
+	// auth check so unauthenticated spam still hits the limiter.
+	r.Post("/v1/auth/password", platform.RequireAuthenticated(throttle(handleChangePassword(svc))))
 	r.Get("/v1/users/me", platform.RequireAuthenticated(handleProfile(svc)))
 	r.Get("/v1/admin/users", platform.RequireRole(
 		[]string{string(RoleAdmin), string(RoleSuperAdmin)},
@@ -199,6 +241,84 @@ func handleLogout(svc *Service) http.HandlerFunc {
 			actor, _ = uuid.Parse(claims.UserID)
 		}
 		if err := svc.LogoutByRefreshToken(r.Context(), req.RefreshToken, actor); err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleVerify consumes a single-use verification token and marks the
+// owning channel verified (200 with the channel).
+func handleVerify(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req, err := platform.DecodeJSON[verifyRequest](r, maxAuthBodyBytes)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		channel, err := svc.Verify(r.Context(), req.Token)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"channel": string(channel)})
+	}
+}
+
+// handleResendVerificationResponse is the 202 body of the resend endpoint.
+// Token/expires_at are populated only by the dev-only echo.
+type handleResendVerificationResponse struct {
+	Channel   string     `json:"channel"`
+	Token     string     `json:"token,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// handleVerificationResend re-issues a verification token within the
+// cooldown + limit policy (202; the body is neutral for unknown emails so
+// the endpoint cannot enumerate accounts).
+func handleVerificationResend(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req, err := platform.DecodeJSON[resendVerificationRequest](r, maxAuthBodyBytes)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		channel, echo, err := svc.ResendVerification(r.Context(), req.Email, req.Channel)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		resp := handleResendVerificationResponse{Channel: string(channel)}
+		if echo != nil {
+			resp.Token = echo.Token
+			resp.ExpiresAt = &echo.ExpiresAt
+		}
+		writeJSON(w, http.StatusAccepted, resp)
+	}
+}
+
+// handleChangePassword rotates the authenticated caller's password after a
+// successful current-password check and breach policy (204). Every live
+// session of the user is revoked.
+func handleChangePassword(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := platform.ClaimsFromContext(r.Context())
+		if !ok {
+			platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+			return
+		}
+		userID, err := uuid.Parse(claims.UserID)
+		if err != nil {
+			platform.WriteError(w, platform.ErrUnauthorized("access token subject is invalid"))
+			return
+		}
+		req, err := platform.DecodeJSON[changePasswordRequest](r, maxAuthBodyBytes)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		if err := svc.ChangePassword(r.Context(), userID, req.CurrentPassword, req.NewPassword); err != nil {
 			platform.WriteError(w, err)
 			return
 		}

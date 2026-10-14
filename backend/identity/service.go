@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -23,12 +24,28 @@ type Service struct {
 	issuer         *Issuer
 	publisher      platform.Publisher
 	trustForwarded bool
+
+	// breacher implements the ADR-0004 breached-password check on every NEW
+	// password (registration, password change), before hashing. nil disables
+	// the check (unit tests, tooling); production always wires one.
+	breacher PasswordBreacher
+	// breachFailClosed selects the availability policy when the breacher
+	// errors: false fails open with an audit note, true refuses the request.
+	breachFailClosed bool
+	// verification carries the email/phone verification flow settings
+	// (token TTL, resend cooldown/limit, dev echo).
+	verification VerificationConfig
 }
 
 // NewService builds a Service over the given store, token issuer and event
 // publisher. Options tweak deployment-sensitive behaviour.
 func NewService(store SessionStore, issuer *Issuer, publisher platform.Publisher, opts ...ServiceOption) *Service {
-	s := &Service{store: store, issuer: issuer, publisher: publisher}
+	s := &Service{
+		store:        store,
+		issuer:       issuer,
+		publisher:    publisher,
+		verification: DefaultVerificationConfig(),
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -44,6 +61,24 @@ type ServiceOption func(*Service)
 // hardening issue #81).
 func WithTrustForwarded(trust bool) ServiceOption {
 	return func(s *Service) { s.trustForwarded = trust }
+}
+
+// WithPasswordBreacher wires the ADR-0004 breached-password check (issue
+// #86) onto every new password, before hashing. A nil breacher disables
+// the check. failClosed selects the policy when the checker errors: false
+// fails open and records an identity.password.breach_check_unavailable
+// audit note; true refuses the request while the check is unavailable.
+func WithPasswordBreacher(breacher PasswordBreacher, failClosed bool) ServiceOption {
+	return func(s *Service) {
+		s.breacher = breacher
+		s.breachFailClosed = failClosed
+	}
+}
+
+// WithVerification installs the email/phone verification flow settings
+// (issue #86).
+func WithVerification(cfg VerificationConfig) ServiceOption {
+	return func(s *Service) { s.verification = cfg }
 }
 
 // emailPattern is a pragmatic RFC-5321-shaped address check: one local part,
@@ -65,10 +100,54 @@ func invalidLogin() *platform.Error {
 	return platform.ErrUnauthorized("invalid email or password")
 }
 
-// Register validates the signup input, hashes the password, creates the
-// user with an initial CUSTOMER role and issues the first token pair.
-// Duplicate emails surface as platform.ErrConflict; the registration and
-// issuance are audited.
+// checkPasswordBreach runs the breached-password policy for a NEW password
+// (ADR-0004 breach-list checking, issue #86). It returns the fail-open
+// audit note (empty when the check completed cleanly or was skipped) so
+// the caller can record the degradation after it knows the acting user.
+// Passwords outside the configured length bounds are not checked here —
+// HashPassword rejects them first, and a doomed length never justifies a
+// network round trip.
+func (s *Service) checkPasswordBreach(ctx context.Context, password string) (string, error) {
+	if s.breacher == nil || len(password) < MinPasswordLength || len(password) > MaxPasswordLength {
+		return "", nil
+	}
+	breached, err := s.breacher.PasswordBreached(ctx, password)
+	if err != nil {
+		if s.breachFailClosed {
+			return "", &platform.Error{
+				Status: http.StatusServiceUnavailable,
+				Code:   "breach_check_unavailable",
+				Title:  "Password breach check unavailable",
+				Detail: "the password could not be checked against breach lists; try again later",
+			}
+		}
+		// Fail-open WITH an audit note: the caller records the degradation
+		// once the acting user is known.
+		return fmt.Sprintf("fail-open: breach check unavailable: %v", err), nil
+	}
+	if breached {
+		return "", platform.ErrValidation(
+			"password appears in a known breach or common-password corpus",
+			platform.FieldError{Field: "password", Issue: "breached"})
+	}
+	return "", nil
+}
+
+// auditBreachNote records the fail-open degradation as its own audit row
+// (object: the acting user). Audit failures propagate: signals are never
+// dropped silently.
+func (s *Service) auditBreachNote(ctx context.Context, userID uuid.UUID, note string) error {
+	return s.audit(ctx, userID, ActionBreachCheckUnavailable, "user", userID.String(), map[string]any{
+		"note": note,
+	})
+}
+
+// Register validates the signup input, checks the password against the
+// breach policy, hashes it, creates the user with an initial CUSTOMER
+// role, issues single-use verification tokens for every present contact
+// channel (issue #86) and issues the first token pair. Duplicate emails
+// surface as platform.ErrConflict; the registration, breach degradation
+// and verification issuances are audited.
 func (s *Service) Register(ctx context.Context, email, phone, password, fullName, deviceName, ip string) (AccessResponse, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	phone = strings.TrimSpace(phone)
@@ -83,6 +162,12 @@ func (s *Service) Register(ctx context.Context, email, phone, password, fullName
 	}
 	if len(fields) > 0 {
 		return AccessResponse{}, platform.ErrValidation("the registration request is invalid", fields...)
+	}
+	// ADR-0004 breach check BEFORE hashing (issue #86): a known-breached
+	// password is rejected without paying the argon2id cost.
+	breachNote, err := s.checkPasswordBreach(ctx, password)
+	if err != nil {
+		return AccessResponse{}, err
 	}
 	hash, err := HashPassword(password)
 	if err != nil {
@@ -101,6 +186,11 @@ func (s *Service) Register(ctx context.Context, email, phone, password, fullName
 	if err := s.store.CreateUser(ctx, &user); err != nil {
 		return AccessResponse{}, err
 	}
+	if breachNote != "" {
+		if err := s.auditBreachNote(ctx, user.ID, breachNote); err != nil {
+			return AccessResponse{}, err
+		}
+	}
 	resp, err := s.issuer.Issue(ctx, s.store, user, deviceName, ip)
 	if err != nil {
 		return AccessResponse{}, err
@@ -112,6 +202,29 @@ func (s *Service) Register(ctx context.Context, email, phone, password, fullName
 	}); err != nil {
 		return AccessResponse{}, err
 	}
+	// Verification tokens (issue #86): one per present channel. The raw
+	// tokens are delivered out-of-band; without MOTIVRA_VERIFICATION_DEV_ECHO
+	// they are only observable through that delivery channel.
+	var echoes []VerificationEcho
+	issueChannel := func(channel VerificationChannel) error {
+		raw, expiresAt, err := s.issueVerificationToken(ctx, user, channel, "registration")
+		if err != nil {
+			return err
+		}
+		if s.verification.DevEcho {
+			echoes = append(echoes, VerificationEcho{Channel: channel, Token: raw, ExpiresAt: expiresAt})
+		}
+		return nil
+	}
+	if err := issueChannel(ChannelEmail); err != nil {
+		return AccessResponse{}, err
+	}
+	if user.Phone != "" {
+		if err := issueChannel(ChannelPhone); err != nil {
+			return AccessResponse{}, err
+		}
+	}
+	resp.Verification = echoes
 	// Every write of the registration succeeded (user row, session,
 	// audit); the event marks that completed fact. The payload carries
 	// IDs and state names only, never credential material. The
@@ -159,6 +272,54 @@ func (s *Service) Login(ctx context.Context, email, password, deviceName, ip str
 		return AccessResponse{}, err
 	}
 	return resp, nil
+}
+
+// ChangePassword authenticates the caller with their current password,
+// applies the breach policy to the new one (BEFORE hashing, issue #86),
+// persists it and revokes every live session of the user — including the
+// one that performed the change — so all devices re-authenticate with the
+// new credential. The change and the session sweep are audited.
+func (s *Service) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) error {
+	user, err := s.store.GetUser(ctx, userID)
+	if err != nil {
+		if isNotFound(err) {
+			return platform.ErrNotFound("user not found")
+		}
+		return fmt.Errorf("load user: %w", err)
+	}
+	ok, err := VerifyPassword(currentPassword, user.PasswordHash)
+	if err != nil {
+		return fmt.Errorf("verify password: %w", err)
+	}
+	if !ok {
+		return platform.ErrUnauthorized("current password is incorrect")
+	}
+
+	// ADR-0004 breach check BEFORE hashing (issue #86). The actor is
+	// known here, so a fail-open degradation is audited immediately.
+	breachNote, err := s.checkPasswordBreach(ctx, newPassword)
+	if err != nil {
+		return err
+	}
+	if breachNote != "" {
+		if err := s.auditBreachNote(ctx, user.ID, breachNote); err != nil {
+			return err
+		}
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	if err := s.store.UpdatePassword(ctx, user.ID, hash); err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	revoked, err := s.store.RevokeUserSessions(ctx, user.ID)
+	if err != nil {
+		return fmt.Errorf("revoke user sessions: %w", err)
+	}
+	return s.audit(ctx, user.ID, ActionPasswordChanged, "user", user.ID.String(), map[string]any{
+		"sessions_revoked": revoked,
+	})
 }
 
 // RefreshTokens rotates the session behind the given opaque refresh token

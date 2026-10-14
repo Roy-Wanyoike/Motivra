@@ -6,8 +6,13 @@ info:
     Authentication and account management for Motivra (ADR-0004 security
     baseline). Access tokens are short-lived HS256 JWTs (15 minutes) issued
     by this service; refresh tokens are opaque 256-bit strings (30 days,
-    rotated on every use, stored only as keyed HMAC-SHA256 digests). All
-    error responses use RFC 7807-style application/problem+json bodies.
+    rotated on every use, stored only as keyed HMAC-SHA256 digests). New
+    passwords are checked against breach corpora before hashing (ADR-0004,
+    issue #86); accounts verify their email/phone channels through
+    single-use tokens, and refresh sessions are refused once the
+    post-registration grace window ends until every present channel is
+    verified. All error responses use RFC 7807-style application/problem+json
+    bodies.
 servers:
   - url: /
     description: Same-origin deployment behind the platform gateway.
@@ -25,7 +30,13 @@ paths:
       description: >
         Emails are stored lowercased; a CUSTOMER role is granted initially.
         Duplicate emails (case-insensitive) and duplicate phone numbers
-        yield 409.
+        yield 409. The password is checked against breach corpora (local
+        denylist, plus the HIBP k-anonymity range API when enabled) before
+        hashing; known-breached passwords yield 422 with a "breached" field
+        issue. One single-use verification token per present contact
+        channel (email, and phone when given) is issued; raw tokens are
+        delivered out-of-band and appear in the response only when the
+        dev-only token echo is enabled.
       requestBody:
         required: true
         content:
@@ -46,7 +57,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
         '422':
-          description: Validation failed (email format, password policy, missing name).
+          description: Validation failed (email format, password policy, missing name, breached password).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Breach check unavailable and the deployment fails closed (MOTIVRA_BREACH_FAIL_CLOSED).
           content:
             application/problem+json:
               schema:
@@ -99,7 +116,11 @@ paths:
       description: >
         Presents an opaque refresh token and receives a fresh pair. The
         presented session is revoked (rotation); reuse of a rotated, revoked
-        or expired token returns 401.
+        or expired token returns 401. Accounts that are still unverified
+        after the post-registration grace window (MOTIVRA_VERIFICATION_GRACE,
+        default 24h) are refused with 403 until every present contact
+        channel is verified; the refusal consumes nothing, so the same token
+        refreshes once verification completes.
       requestBody:
         required: true
         content:
@@ -120,13 +141,125 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
         '403':
-          description: Account is not active.
+          description: Account is not active, or verification is required after the grace window ended.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '422':
           description: Malformed request body.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/auth/verify:
+    post:
+      operationId: verify
+      tags: [auth]
+      summary: Consume a single-use verification token (issue #86)
+      description: >
+        Marks the token's channel (email or phone) verified for the owning
+        account. Tokens are single-use: unknown, expired, already-consumed
+        and raced tokens all return the identical 401 so token state is
+        never disclosed. Consumption and the channel timestamp land in one
+        transaction; the event is audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        '200':
+          description: Channel verified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyResponse'
+        '401':
+          description: Token is unknown, expired or already consumed.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Missing token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/auth/verification/resend:
+    post:
+      operationId: resendVerification
+      tags: [auth]
+      summary: Re-issue a verification token (issue #86)
+      description: >
+        Re-issues a single-use token for the account behind the given email
+        (channel defaults to email; phone applies to accounts with a phone).
+        Rate-limited per user and channel (cooldown + rolling limit) and
+        per IP; exceeding the limits yields 429. Unknown emails and
+        channels that need no token return a neutral 202 so the endpoint
+        cannot enumerate accounts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerificationRequest'
+      responses:
+        '202':
+          description: Resend accepted; the body is neutral for unknown emails. Token fields appear only with the dev-only echo enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResendVerificationResponse'
+        '422':
+          description: Missing email or invalid channel.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '429':
+          description: Resend cooldown active or rolling limit reached.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/auth/password:
+    post:
+      operationId: changePassword
+      tags: [auth]
+      summary: Change the authenticated caller's password (issue #86)
+      description: >
+        Verifies the current password, breach-checks the new one BEFORE
+        hashing (ADR-0004), persists it and revokes every live session of
+        the user — including the caller's — so all devices re-authenticate.
+        Audited.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: Password changed; all sessions revoked.
+        '401':
+          description: Missing/invalid access token, or the current password is incorrect.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: New password violates the policy or is breached.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Breach check unavailable and the deployment fails closed (MOTIVRA_BREACH_FAIL_CLOSED).
           content:
             application/problem+json:
               schema:
@@ -259,6 +392,14 @@ components:
           type: string
           format: date-time
           description: Absolute expiry of the access token.
+        verification:
+          type: array
+          description: >
+            Present only when the dev-only token echo (MOTIVRA_VERIFICATION_DEV_ECHO)
+            is enabled: the raw single-use verification tokens issued by this
+            registration. Production deliveries are out-of-band and never echo.
+          items:
+            $ref: '#/components/schemas/VerificationEcho'
     RegisterRequest:
       type: object
       required: [email, password, full_name]
@@ -274,7 +415,11 @@ components:
           type: string
           minLength: 10
           maxLength: 128
-          description: Argon2id-hashed server-side (64 MB, t=3, p=4); never stored or logged in plaintext.
+          description: >
+            Argon2id-hashed server-side (64 MB, t=3, p=4); never stored or
+            logged in plaintext. Checked against breach corpora before
+            hashing; known-breached passwords are rejected with a
+            "breached" field issue.
         full_name:
           type: string
           minLength: 1
@@ -331,9 +476,80 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Role'
+        email_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the email channel was verified; null while unverified (issue #86).
+        phone_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the phone channel was verified; null while absent or unverified (issue #86).
         created_at:
           type: string
           format: date-time
+    VerifyRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: The raw single-use token delivered out-of-band.
+    VerifyResponse:
+      type: object
+      required: [channel]
+      properties:
+        channel:
+          $ref: '#/components/schemas/VerificationChannel'
+    VerificationChannel:
+      type: string
+      enum: [email, phone]
+    VerificationEcho:
+      type: object
+      required: [channel, token, expires_at]
+      properties:
+        channel:
+          $ref: '#/components/schemas/VerificationChannel'
+        token:
+          type: string
+          description: The raw single-use token; deliver or use it before expiry.
+        expires_at:
+          type: string
+          format: date-time
+    ResendVerificationRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+        channel:
+          $ref: '#/components/schemas/VerificationChannel'
+    ResendVerificationResponse:
+      type: object
+      required: [channel]
+      properties:
+        channel:
+          $ref: '#/components/schemas/VerificationChannel'
+        token:
+          type: string
+          description: Present only with the dev-only token echo enabled.
+        expires_at:
+          type: string
+          format: date-time
+          description: Present only with the dev-only token echo enabled.
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 10
+          maxLength: 128
+          description: Breach-checked before hashing; known-breached passwords are rejected.
     UserList:
       type: object
       required: [users, limit, offset]

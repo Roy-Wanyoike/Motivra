@@ -17,48 +17,84 @@ import (
 )
 
 // Token defaults (ADR-0004): short-lived HS256 access tokens, 30-day
-// idle-capped refresh sessions, 256-bit opaque refresh tokens.
+// idle-capped refresh sessions, 256-bit opaque refresh tokens, and the
+// default post-registration window in which an unverified account may
+// still mint sessions (issue #86 verification grace).
 const (
 	DefaultAccessTTL  = 15 * time.Minute
 	DefaultRefreshTTL = 30 * 24 * time.Hour
+
+	// DefaultVerificationGrace is the window after registration during
+	// which an unverified account can still log in and rotate refresh
+	// sessions. Once it ends, session minting is refused until every
+	// present contact channel is verified (issue #86).
+	DefaultVerificationGrace = 24 * time.Hour
 
 	refreshTokenBytes = 32 // 256 bits of entropy
 )
 
 // AccessResponse is the credential pair returned by registration, login and
 // refresh. RefreshToken is the opaque client token (base64url, 256 bits);
-// only its SHA-256 digest is persisted.
+// only its HMAC-SHA256 digest is persisted. Verification is populated only
+// by registration/resend responses and only when the dev-only token echo is
+// enabled (MOTIVRA_VERIFICATION_DEV_ECHO) — production tokens are delivered
+// out-of-band and never echo.
 type AccessResponse struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
-	ExpiresAt    time.Time `json:"expires_at"`
+	AccessToken  string             `json:"access_token"`
+	RefreshToken string             `json:"refresh_token"`
+	ExpiresAt    time.Time          `json:"expires_at"`
+	Verification []VerificationEcho `json:"verification,omitempty"`
 }
 
 // Issuer creates sessions and signs HS256 access tokens. It is the first
 // implementation of the issuer-agnostic token abstraction (ADR-0004):
 // swapping to an external OIDC provider later changes this type only.
 type Issuer struct {
-	secret      []byte
-	issuer      string
-	audience    string
-	accessTTL   time.Duration
-	refreshTTL  time.Duration
-	absoluteTTL time.Duration
+	secret            []byte
+	issuer            string
+	audience          string
+	accessTTL         time.Duration
+	refreshTTL        time.Duration
+	absoluteTTL       time.Duration
+	verificationGrace time.Duration
+}
+
+// IssuerOption customises an Issuer at construction.
+type IssuerOption func(*Issuer)
+
+// WithVerificationGrace sets the post-registration window during which an
+// unverified account may still obtain refresh sessions (issue #86). A value
+// of zero or less disables the gate entirely (documented escape hatch for
+// deployments that opt out of verification enforcement); the default is
+// DefaultVerificationGrace.
+func WithVerificationGrace(grace time.Duration) IssuerOption {
+	return func(i *Issuer) {
+		if grace > 0 {
+			i.verificationGrace = grace
+			return
+		}
+		i.verificationGrace = 0
+	}
 }
 
 // NewIssuer builds an Issuer for the given shared HS256 secret, token issuer
-// and audience, using the default 15-minute access TTL, 30-day refresh TTL
-// and 90-day absolute session cap. The secret must be distributed
-// out-of-band to every validating service.
-func NewIssuer(secret, issuer, audience string) *Issuer {
-	return &Issuer{
-		secret:      []byte(secret),
-		issuer:      issuer,
-		audience:    audience,
-		accessTTL:   DefaultAccessTTL,
-		refreshTTL:  DefaultRefreshTTL,
-		absoluteTTL: platform.DefaultAbsoluteSessionTTL,
+// and audience, using the default 15-minute access TTL, 30-day refresh TTL,
+// 90-day absolute session cap and 24-hour verification grace. The secret
+// must be distributed out-of-band to every validating service.
+func NewIssuer(secret, issuer, audience string, opts ...IssuerOption) *Issuer {
+	i := &Issuer{
+		secret:            []byte(secret),
+		issuer:            issuer,
+		audience:          audience,
+		accessTTL:         DefaultAccessTTL,
+		refreshTTL:        DefaultRefreshTTL,
+		absoluteTTL:       platform.DefaultAbsoluteSessionTTL,
+		verificationGrace: DefaultVerificationGrace,
 	}
+	for _, opt := range opts {
+		opt(i)
+	}
+	return i
 }
 
 // Issue creates a new refresh session for user and returns a fresh
@@ -73,8 +109,9 @@ func (i *Issuer) Issue(ctx context.Context, store SessionStore, user User, devic
 
 // Refresh validates an opaque refresh token, rotates its session (revoking
 // the presented row and creating a new one) and returns a fresh
-// access/refresh pair. Unknown, revoked, expired tokens and tokens of
-// non-active users all yield the same unauthorized error.
+// access/refresh pair. Unknown, revoked, expired tokens, tokens of
+// non-active users and tokens of accounts that stayed unverified past the
+// verification grace window all yield the same rejection semantics.
 func (i *Issuer) Refresh(ctx context.Context, store SessionStore, refreshToken string) (AccessResponse, Session, error) {
 	if refreshToken == "" {
 		return AccessResponse{}, Session{}, platform.ErrUnauthorized("refresh token is invalid")
@@ -109,6 +146,14 @@ func (i *Issuer) Refresh(ctx context.Context, store SessionStore, refreshToken s
 	if user.Status != StatusActive {
 		return AccessResponse{}, Session{}, platform.ErrForbidden("account is not active")
 	}
+	// Verification gate (issue #86), checked BEFORE rotation: refusing
+	// after revoking the presented session would destroy the user's only
+	// live session. The same predicate runs again in issue() so fresh
+	// logins are gated too.
+	if verificationRefused(time.Now(), user, i.verificationGrace) {
+		return AccessResponse{}, Session{}, platform.ErrForbidden(
+			"account verification is required; the post-registration grace window has ended")
+	}
 
 	// Rotate first: revoke the presented session, then mint its successor.
 	if err := store.RevokeSession(ctx, sess.ID); err != nil {
@@ -130,10 +175,30 @@ func (i *Issuer) Revoke(ctx context.Context, store SessionStore, sessionID uuid.
 	return nil
 }
 
+// verificationRefused reports whether minting any new session for user
+// (fresh login or rotation) must be refused because the account is still
+// unverified and the post-registration grace window measured from
+// user.CreatedAt has ended (issue #86). grace <= 0 disables the gate.
+func verificationRefused(now time.Time, user User, grace time.Duration) bool {
+	if grace <= 0 {
+		return false
+	}
+	if user.verificationSatisfied() {
+		return false
+	}
+	return !now.Before(user.CreatedAt.Add(grace))
+}
+
 // issue is the shared session-creation and signing path for Issue and
 // Refresh. absolute is the non-extendable session bound: zero for fresh
 // logins (now+absoluteTTL), the predecessor's value across rotations.
 func (i *Issuer) issue(ctx context.Context, store SessionStore, user User, deviceName, ip string, absolute time.Time) (AccessResponse, error) {
+	// Verification gate (issue #86): every session-minting path funnels
+	// through here, so login, registration and rotation all enforce it.
+	if verificationRefused(time.Now(), user, i.verificationGrace) {
+		return AccessResponse{}, platform.ErrForbidden(
+			"account verification is required; the post-registration grace window has ended")
+	}
 	tenantID, roles, err := i.claimContext(ctx, store, user)
 	if err != nil {
 		return AccessResponse{}, err
@@ -232,21 +297,36 @@ type RoleGrantsProvider interface {
 	GetRoleGrants(ctx context.Context, userID uuid.UUID) ([]RoleGrant, error)
 }
 
-// newRefreshToken generates a 256-bit opaque refresh token, base64url-encoded.
-func newRefreshToken() (string, error) {
+// newOpaqueToken generates a 256-bit opaque token, base64url-encoded. It is
+// the shared generator for refresh tokens and single-use verification
+// tokens (issue #86).
+func newOpaqueToken() (string, error) {
 	raw := make([]byte, refreshTokenBytes)
 	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate refresh token: %w", err)
+		return "", fmt.Errorf("generate opaque token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// RefreshTokenHash derives the hex-encoded HMAC-SHA256 digest stored in the
-// sessions table for an opaque refresh token (ADR-0004: tokens are never
-// persisted in plaintext; the digest is keyed with the issuer secret so a
-// database leak alone cannot be cross-checked against guessed tokens).
-func (i *Issuer) RefreshTokenHash(token string) string {
+// newRefreshToken generates a 256-bit opaque refresh token,
+// base64url-encoded.
+func newRefreshToken() (string, error) {
+	return newOpaqueToken()
+}
+
+// TokenHash derives the hex-encoded HMAC-SHA256 digest stored for an opaque
+// token — refresh sessions and single-use verification tokens alike
+// (ADR-0004: tokens are never persisted in plaintext; the digest is keyed
+// with the issuer secret so a database leak alone cannot be cross-checked
+// against guessed tokens).
+func (i *Issuer) TokenHash(token string) string {
 	mac := hmac.New(sha256.New, i.secret)
 	_, _ = mac.Write([]byte(token))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// RefreshTokenHash derives the hex-encoded HMAC-SHA256 digest stored in the
+// sessions table for an opaque refresh token (ADR-0004).
+func (i *Issuer) RefreshTokenHash(token string) string {
+	return i.TokenHash(token)
 }
