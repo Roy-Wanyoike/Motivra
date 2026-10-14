@@ -1,0 +1,34 @@
+# First alert rules (ADR-0005 launch set, observability issue #84):
+# service liveness, 5xx burn and auth-throttle pressure.
+groups:
+  - name: motivra-golden-signals
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"motivra-.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Motivra service {{ $labels.job }} is not scrapeable"
+          description: "Prometheus has failed to scrape {{ $labels.job }} for over a minute — the process may be down or the metrics listener unreachable. Runbook: docs/RUNBOOK.md troubleshooting."
+
+      - alert: High5xxRate
+        expr: |
+          sum by (job) (rate(http_requests_total{status="5xx"}[5m]))
+            /
+          sum by (job) (rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx rate above 5% on {{ $labels.job }}"
+          description: "Server errors exceed 5% of requests over 5 minutes on {{ $labels.job }}. Check the service logs (Loki) and recent deploys."
+
+      - alert: AuthThrottlePressure
+        expr: sum by (job) (rate(http_requests_total{route=~"/v1/auth/.*", status="4xx"}[5m])) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained 4xx pressure on auth endpoints ({{ $labels.job }})"
+          description: "More than 10 auth 4xx responses/second for 10 minutes — could be a credential-stuffing attempt (rate limiter is absorbing it) or a broken client release."

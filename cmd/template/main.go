@@ -29,7 +29,7 @@ func main() {
 		logger.Error("tracing setup failed", "error", err)
 		os.Exit(1)
 	}
-	metricsHandler, stopMetrics, err := platform.SetupMetrics(cfg.App.Name, cfg.App.Env)
+	metrics, err := platform.SetupMetrics(cfg.App.Name, cfg.App.Env)
 	if err != nil {
 		logger.Error("metrics setup failed", "error", err)
 		os.Exit(1)
@@ -39,7 +39,11 @@ func main() {
 	var publisher *platform.NATSPublisher
 	var cleanups []func(context.Context) error
 
-	opts := []platform.ServerOption{platform.WithMount("/metrics", metricsHandler)}
+	// Metrics live on the internal listener only (issue #81/#84) — never
+	// mounted on the public API router.
+	opts := []platform.ServerOption{
+		platform.WithMiddleware(metrics.HTTP.Middleware),
+	}
 
 	if cfg.Database.URL != "" {
 		pool, err = platform.NewPostgres(ctx, cfg.Database.URL)
@@ -60,12 +64,12 @@ func main() {
 		}
 		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
 	}
-	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metricsHandler)
+	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metrics.Handler)
 	if err != nil {
 		logger.Error("metrics listener unavailable", "error", err, "addr", cfg.MetricsAddr)
 		os.Exit(1)
 	}
-	cleanups = append(cleanups, stopMetricsSrv, stopMetrics, stopTracing)
+	cleanups = append(cleanups, stopMetricsSrv, metrics.Stop, stopTracing)
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
 	opts = append(opts, platform.WithMiddleware(platform.AuthMiddleware(validator)))

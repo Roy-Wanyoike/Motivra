@@ -9,6 +9,9 @@ import (
 // AuthMiddleware validates Bearer access tokens and stores the resulting
 // Claims in the request context. Requests without a token proceed
 // unauthenticated; RequireAuthenticated enforces presence downstream.
+// Valid claims also enrich the request logger with tenant_id so every
+// subsequent log line carries the tenant boundary (ADR-0005 correlation,
+// observability issue #84).
 func AuthMiddleware(v *JWTValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -22,7 +25,11 @@ func AuthMiddleware(v *JWTValidator) func(http.Handler) http.Handler {
 				WriteError(w, ErrUnauthorized("access token is invalid or expired"))
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyClaims, claims)))
+			ctx := context.WithValue(r.Context(), ctxKeyClaims, claims)
+			if claims.TenantID != "" {
+				EnrichRequestLogger(ctx, "tenant_id", claims.TenantID)
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

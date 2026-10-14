@@ -1,0 +1,32 @@
+# Prometheus scrape + alert rules (observability issue #84).
+# App services expose RED metrics on their INTERNAL listeners (:9090);
+# the OTel-collector-pushed metrics are also scraped on :8889.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # Service-exposed metrics (platform SetupMetrics registries).
+  - job_name: motivra-identity
+    static_configs:
+      - targets: ["identity:9090"]
+  - job_name: motivra-vehicles
+    static_configs:
+      - targets: ["vehicles:9090"]
+  - job_name: motivra-jobs
+    static_configs:
+      - targets: ["jobs:9090"]
+  - job_name: motivra-dispatch
+    static_configs:
+      - targets: ["dispatch:9090"]
+  # Collector pipeline (any OTLP-pushed metrics, e.g. from apps later).
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+  # Collector self-telemetry.
+  - job_name: otel-collector-self
+    static_configs:
+      - targets: ["otel-collector:8888"]

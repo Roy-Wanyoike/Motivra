@@ -1,0 +1,96 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["motivra", "golden-signals"],
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": { "uid": "motivra-prometheus", "type": "prometheus" },
+        "query": "label_values(http_requests_total, service)",
+        "refresh": 2,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "title": "Motivra — Golden Signals",
+  "uid": "motivra-golden",
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate (req/s) — rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "motivra-prometheus", "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (service) (rate(http_requests_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Error rate (%) — 5xx share of requests",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "motivra-prometheus", "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "100 * sum by (service) (rate(http_requests_total{service=~\"$service\", status=\"5xx\"}[5m])) / sum by (service) (rate(http_requests_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Request duration p95 / p50 — latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "motivra-prometheus", "type": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))",
+          "legendFormat": "p95 {{service}}"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (service, le) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))",
+          "legendFormat": "p50 {{service}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Scrape health — up (ServiceDown alert source)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "motivra-prometheus", "type": "prometheus" },
+      "targets": [
+        { "expr": "up{job=~\"motivra-.*\"}", "legendFormat": "{{job}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Status class mix — errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "uid": "motivra-prometheus", "type": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (service, status) (rate(http_requests_total{service=~\"$service\"}[5m]))",
+          "legendFormat": "{{service}} {{status}}"
+        }
+      ]
+    }
+  ]
+}
