@@ -427,6 +427,17 @@ root causes are **dashboard-side, not code-side**:
 | `motivra-rho.vercel.app` (and similar guesses) | `404 NOT_FOUND` | unclaimed domain — no project owns it; never existed |
 | `motivra-services-*` | `404` / `FUNCTION_INVOCATION_FAILED` | backend container on Vercel — unsupported target (see above) |
 
+**Quota exhaustion (observed 2026-10-14 ~20:30 UTC):** with two teams
+connected, every commit fires 2-3 deployments (both `motivra`-family
+projects + PR previews). A ~30-commit day exhausted BOTH teams' Hobby
+daily quota — Vercel bot comments show `Resource is limited - try again
+in 24 hours (more than 100, code: "api-deployments-free-per-day")` on
+every post-16:34 commit, commit statuses flip to `failure`, and the
+previously-verified live surface went 200 -> 404. The quota self-clears
+on the UTC daily reset; the FIRST successful deployment after the reset
+promotes latest main again. Permanent fix = the team cleanup below;
+otherwise the burn rate keeps re-exhausting the quota.
+
 **Root cause to fix in the Vercel dashboard:** the GitHub repo is connected
 to TWO Vercel teams at once (`youngsharksites` AND the personal
 `roywanyoikes-projects`). Consequences: duplicate projects with colliding
