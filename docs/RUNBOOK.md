@@ -202,6 +202,33 @@ needs DISPATCHER/ADMIN/SUPER_ADMIN).
 
 ---
 
+## 5a. Data operations (backup, restore, retention, integrity)
+
+Operational commands introduced by the integrity/compliance pass (issue
+#83); full procedures live in the Backup & DR and PII sections (issue #85).
+
+```bash
+make db-backup                                 # timestamped custom-format dump to ./backups
+make db-restore FILE=backups/<dump>.dump I_UNDERSTAND_THIS_DROPS_DATA=1   # DROPS the target DB
+make integrity-check                           # per-table counts + orphan queries + trigger arms (must be all-clear)
+make purge-expired PURGE_AUDIT=false           # retention dry run (counts eligible audit rows)
+make purge-expired PURGE_AUDIT=true AUDIT_MONTHS=18   # actual audit purge (log the invocation!)
+```
+
+Rules:
+- **Backups are not real until restored.** After every backup, run the
+  restore into a scratch database and `make integrity-check` against it.
+- **`audit_log` and `job_transitions` are append-only at the database
+  level** (identity 000006 / jobs 000005): UPDATE/DELETE raise exceptions.
+  The ONLY sanctioned audit deletion path is the guarded window inside
+  `scripts/purge_expired.sql` with `PURGE_AUDIT=true`; record every such
+  invocation in the operations log.
+- **Retention schedule:** sessions purge = daily (cron); audit purge =
+  monthly, 18-month window by default; integrity check = weekly and after
+  every restore/cleanup.
+
+---
+
 ## 6. Troubleshooting
 
 | Symptom | Likely cause / fix |
