@@ -115,6 +115,48 @@ type userListResponse struct {
 	Offset int            `json:"offset"`
 }
 
+// sessionResponse is the API projection of a refresh session (issue #87).
+// Credential material (the refresh-token digest) is never serialized — the
+// service zeroes it before projection, and this type has no field for it.
+type sessionResponse struct {
+	ID                uuid.UUID `json:"id"`
+	DeviceName        string    `json:"device_name"`
+	IPAddress         string    `json:"ip_address"`
+	CreatedAt         string    `json:"created_at"`
+	ExpiresAt         string    `json:"expires_at"`
+	AbsoluteExpiresAt string    `json:"absolute_expires_at"`
+	RevokedAt         *string   `json:"revoked_at"`
+	Current           bool      `json:"current"`
+}
+
+// newSessionResponse projects a Session (RefreshTokenHash already stripped
+// by the service) and marks the caller's current session.
+func newSessionResponse(sess Session, currentSessionID string) sessionResponse {
+	resp := sessionResponse{
+		ID:                sess.ID,
+		DeviceName:        sess.DeviceName,
+		IPAddress:         sess.IPAddress,
+		CreatedAt:         sess.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+		ExpiresAt:         sess.ExpiresAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+		AbsoluteExpiresAt: sess.AbsoluteExpiresAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+		RevokedAt:         formatTimePtr(sess.RevokedAt),
+	}
+	if sess.ID.String() == currentSessionID {
+		resp.Current = true
+	}
+	return resp
+}
+
+// sessionListResponse is the GET /v1/auth/sessions body.
+type sessionListResponse struct {
+	Sessions []sessionResponse `json:"sessions"`
+}
+
+// revokedAllResponse is the DELETE /v1/auth/sessions body.
+type revokedAllResponse struct {
+	Revoked int `json:"revoked"`
+}
+
 // clientIP resolves the caller IP for audit rows and rate-limit keys.
 // X-Forwarded-For is honoured only when the service was built with
 // WithTrustForwarded (i.e. it sits behind a trusted proxy); otherwise the
@@ -143,13 +185,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // Routes registers the identity HTTP API on r: the public authentication
-// endpoints plus the protected profile and admin listing routes. Protected
-// routes rely on platform.AuthMiddleware having populated the request
-// context (mounted by the service binary) and enforce authn/authz here.
-// limiter (optional) throttles the public auth endpoints per client IP —
-// argon2id verification is expensive, so unthrottled auth is also a
-// CPU/memory DoS vector (hardening issue #81). Pass nil to disable.
-func Routes(r chi.Router, svc *Service, limiter *platform.RateLimiter) {
+// endpoints plus the protected profile, session-management and admin
+// listing routes. Protected routes rely on platform.AuthMiddleware having
+// populated the request context (mounted by the service binary) and
+// enforce authn/authz here. limiter (optional) throttles the public auth
+// endpoints per client IP — argon2id verification is expensive, so
+// unthrottled auth is also a CPU/memory DoS vector (hardening issue #81).
+// Either limiter backend (in-process or Redis, issue #87) satisfies
+// platform.AuthLimiter. Pass nil to disable.
+func Routes(r chi.Router, svc *Service, limiter platform.AuthLimiter) {
 	throttle := func(h http.HandlerFunc) http.HandlerFunc { return h }
 	if limiter != nil {
 		limiterMW := limiter.Middleware(func(r *http.Request) string {
@@ -169,6 +213,16 @@ func Routes(r chi.Router, svc *Service, limiter *platform.RateLimiter) {
 	// Authenticated password change (issue #86); throttled before the
 	// auth check so unauthenticated spam still hits the limiter.
 	r.Post("/v1/auth/password", platform.RequireAuthenticated(throttle(handleChangePassword(svc))))
+	// Session management API (issue #87): visibility and revocation control
+	// over the caller's refresh sessions. The {sessionID} route must be
+	// registered before the bare collection DELETE so chi keeps both.
+	r.Get("/v1/auth/sessions", platform.RequireAuthenticated(handleListSessions(svc)))
+	r.Delete("/v1/auth/sessions/{sessionID}", platform.RequireAuthenticated(handleRevokeSession(svc)))
+	r.Delete("/v1/auth/sessions", platform.RequireAuthenticated(handleRevokeAllSessions(svc)))
+	// JWKS (ADR-0007, issue #87): the issuer's PUBLIC signing keys, the only
+	// trust anchor verifying services need. Public by design — it carries no
+	// secret material.
+	r.Get("/.well-known/jwks.json", handleJWKS(svc))
 	r.Get("/v1/users/me", platform.RequireAuthenticated(handleProfile(svc)))
 	r.Get("/v1/admin/users", platform.RequireRole(
 		[]string{string(RoleAdmin), string(RoleSuperAdmin)},
@@ -412,4 +466,103 @@ func clampOffset(offset int) int {
 		return 0
 	}
 	return offset
+}
+
+// handleListSessions returns the authenticated caller's refresh sessions
+// (200). Revoked sessions are included (they render as "signed out"
+// devices); the caller's current session carries current=true. The
+// response never contains credential material.
+func handleListSessions(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := platform.ClaimsFromContext(r.Context())
+		if !ok {
+			platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+			return
+		}
+		userID, err := uuid.Parse(claims.UserID)
+		if err != nil {
+			platform.WriteError(w, platform.ErrUnauthorized("access token subject is invalid"))
+			return
+		}
+		sessions, err := svc.ListSessions(r.Context(), userID)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		out := make([]sessionResponse, 0, len(sessions))
+		for _, sess := range sessions {
+			out = append(out, newSessionResponse(sess, claims.SessionID))
+		}
+		writeJSON(w, http.StatusOK, sessionListResponse{Sessions: out})
+	}
+}
+
+// handleRevokeSession revokes the session with the {sessionID} path
+// parameter (204). Unknown ids and other users' sessions are the same 404.
+// Audited.
+func handleRevokeSession(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := platform.ClaimsFromContext(r.Context())
+		if !ok {
+			platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+			return
+		}
+		userID, err := uuid.Parse(claims.UserID)
+		if err != nil {
+			platform.WriteError(w, platform.ErrUnauthorized("access token subject is invalid"))
+			return
+		}
+		sessionID, err := uuid.Parse(chi.URLParam(r, "sessionID"))
+		if err != nil {
+			platform.WriteError(w, platform.ErrValidation("sessionID must be a UUID",
+				platform.FieldError{Field: "sessionID", Issue: "invalid"}))
+			return
+		}
+		if err := svc.RevokeSession(r.Context(), userID, sessionID, userID); err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleRevokeAllSessions revokes every live session of the authenticated
+// caller — sign-out everywhere, including the calling session — and
+// returns the revoked count (200). Audited with the count.
+func handleRevokeAllSessions(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := platform.ClaimsFromContext(r.Context())
+		if !ok {
+			platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+			return
+		}
+		userID, err := uuid.Parse(claims.UserID)
+		if err != nil {
+			platform.WriteError(w, platform.ErrUnauthorized("access token subject is invalid"))
+			return
+		}
+		revoked, err := svc.RevokeAllSessions(r.Context(), userID, userID)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, revokedAllResponse{Revoked: revoked})
+	}
+}
+
+// handleJWKS serves the issuer's public key set (ADR-0007): the only
+// trust anchor verifying services hold. Cacheable briefly; rotation is
+// picked up by the validators' unknown-kid refresh.
+func handleJWKS(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		keys, ok := svc.issuer.JWKS()
+		if !ok {
+			platform.WriteError(w, platform.ErrNotFound("no JWKS key set is configured (legacy HS256 signing)"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(keys)
+	}
 }

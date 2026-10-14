@@ -6,13 +6,22 @@ import (
 	"time"
 )
 
+// AuthLimiter is the limiter surface the identity routes consume
+// (issue #87): both the in-process fixed-window RateLimiter (single
+// instance) and the Redis-backed sliding-window RedisRateLimiter
+// (cross-instance consistency) satisfy it, so the route table never
+// changes with the deployment shape.
+type AuthLimiter interface {
+	Middleware(keyFn func(*http.Request) string) func(http.Handler) http.Handler
+}
+
 // RateLimiter is a fixed-window per-key request limiter for protecting
 // expensive or abuse-prone endpoints (authentication above all: each
 // argon2id verification allocates 64 MiB, so unthrottled login is also a
 // memory/CPU denial-of-service vector). It is intentionally in-process:
-// correct for the single-instance-per-service deployment shape of the
-// compose stack; horizontal scaling needs the Redis-backed limiter
-// (tracked as a follow-up issue) so limits are shared across replicas.
+// correct for single-instance deployments and as the fallback when
+// MOTIVRA_REDIS_URL is unset; horizontal scaling uses RedisRateLimiter so
+// limits are shared across replicas (issue #87, ADR-0007).
 //
 // Buckets are keyed by caller-chosen strings (client IPs for auth routes)
 // and garbage-collected lazily, so memory stays bounded under rotation.

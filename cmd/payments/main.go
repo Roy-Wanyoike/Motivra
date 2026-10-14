@@ -149,11 +149,22 @@ func main() {
 	// The money routes sit behind the JWT middleware; the webhook receiver
 	// does NOT (the provider HMAC signature is its trust boundary — the
 	// Routes wiring leaves it unwrapped).
-	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
+	// Token verification (ADR-0007, issue #87): public keys only — JWKS
+	// from the identity service by default, or a distributed key file. The
+	// legacy HS256 secret verifies tokens only behind the explicit
+	// MOTIVRA_JWT_ALLOW_HS256 migration flag.
+	validator, err := platform.NewValidatorFromConfig(cfg)
+	if err != nil {
+		logger.Error("token validator unavailable", "error", err)
+		os.Exit(1)
+	}
 	srv := platform.NewServer(cfg, logger,
 		platform.WithChecker("database", func(ctx context.Context) error {
 			return pool.Ping(ctx)
 		}),
+		// JWKS readiness: a verifier that cannot load the issuer key set
+		// refuses every token — surface that on /readyz (ADR-0007).
+		platform.WithChecker("jwks", validator.ReadyCheck),
 		platform.WithMiddleware(metrics.HTTP.Middleware),
 	)
 	authed := func(h http.HandlerFunc) http.HandlerFunc {

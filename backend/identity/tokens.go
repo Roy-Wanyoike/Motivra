@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -16,10 +17,11 @@ import (
 	"github.com/Roy-Wanyoike/Motivra/backend/platform"
 )
 
-// Token defaults (ADR-0004): short-lived HS256 access tokens, 30-day
-// idle-capped refresh sessions, 256-bit opaque refresh tokens, and the
-// default post-registration window in which an unverified account may
-// still mint sessions (issue #86 verification grace).
+// Token defaults (ADR-0004): short-lived asymmetric access tokens
+// (EdDSA/RS256 by default — legacy HS256 only behind the migration flag,
+// ADR-0007), 30-day idle-capped refresh sessions, 256-bit opaque refresh
+// tokens, and the default post-registration window in which an unverified
+// account may still mint sessions (issue #86 verification grace).
 const (
 	DefaultAccessTTL  = 15 * time.Minute
 	DefaultRefreshTTL = 30 * 24 * time.Hour
@@ -46,11 +48,18 @@ type AccessResponse struct {
 	Verification []VerificationEcho `json:"verification,omitempty"`
 }
 
-// Issuer creates sessions and signs HS256 access tokens. It is the first
-// implementation of the issuer-agnostic token abstraction (ADR-0004):
-// swapping to an external OIDC provider later changes this type only.
+// Issuer creates sessions and signs access tokens. Since ADR-0007 (issue
+// #87) signing is asymmetric by default: a platform.JWTSigner (EdDSA or
+// RS256, kid-stamped) is injected via WithSigner and the Issuer exposes its
+// public half through JWKS(). Without a signer the Issuer falls back to
+// the legacy HS256 shared-secret path — kept ONLY for the migration window
+// and tests; production identity boots refuse it (cmd/identity). It is the
+// first implementation of the issuer-agnostic token abstraction
+// (ADR-0004): swapping to an external OIDC provider later changes this
+// type only.
 type Issuer struct {
 	secret            []byte
+	signer            *platform.JWTSigner
 	issuer            string
 	audience          string
 	accessTTL         time.Duration
@@ -77,10 +86,21 @@ func WithVerificationGrace(grace time.Duration) IssuerOption {
 	}
 }
 
-// NewIssuer builds an Issuer for the given shared HS256 secret, token issuer
-// and audience, using the default 15-minute access TTL, 30-day refresh TTL,
-// 90-day absolute session cap and 24-hour verification grace. The secret
-// must be distributed out-of-band to every validating service.
+// WithSigner installs the asymmetric token signer (ADR-0007). When set,
+// every access token is signed with its private key and stamped with its
+// kid; the public half is served at /.well-known/jwks.json. A nil signer
+// keeps the legacy HS256 path (migration window / tests).
+func WithSigner(signer *platform.JWTSigner) IssuerOption {
+	return func(i *Issuer) { i.signer = signer }
+}
+
+// NewIssuer builds an Issuer for the given opaque-token digest key, token
+// issuer and audience, using the default 15-minute access TTL, 30-day
+// refresh TTL, 90-day absolute session cap and 24-hour verification
+// grace. The secret keys the HMAC digests of opaque tokens (refresh
+// sessions, verification tokens) so a database leak alone cannot be
+// cross-checked against guessed tokens (ADR-0004); it is shared with
+// NO verifier service in the asymmetric posture.
 func NewIssuer(secret, issuer, audience string, opts ...IssuerOption) *Issuer {
 	i := &Issuer{
 		secret:            []byte(secret),
@@ -227,22 +247,48 @@ func (i *Issuer) issue(ctx context.Context, store SessionStore, user User, devic
 	}
 
 	expiresAt := now.Add(i.accessTTL)
-	claims := jwt.MapClaims{
-		"iss":       i.issuer,
-		"aud":       i.audience,
-		"sub":       user.ID.String(),
-		"sid":       sessionID.String(),
-		"tenant_id": tenantID,
-		"role":      HighestRole(roles),
-		"roles":     roleStrings(roles),
-		"iat":       now.Unix(),
-		"exp":       expiresAt.Unix(),
-	}
-	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(i.secret)
+	claims := platform.AccessClaims(platform.Claims{
+		UserID:    user.ID.String(),
+		TenantID:  tenantID,
+		Role:      HighestRole(roles),
+		SessionID: sessionID.String(),
+		IssuedAt:  now,
+		ExpiresAt: expiresAt,
+	}, roleStrings(roles), i.issuer, i.audience)
+	signed, err := i.sign(claims)
 	if err != nil {
 		return AccessResponse{}, fmt.Errorf("sign access token: %w", err)
 	}
 	return AccessResponse{AccessToken: signed, RefreshToken: refreshToken, ExpiresAt: expiresAt}, nil
+}
+
+// sign produces the compact access token: through the asymmetric signer
+// (kid-stamped EdDSA/RS256, ADR-0007) when installed, else the legacy
+// HS256 shared-secret path.
+func (i *Issuer) sign(claims jwt.MapClaims) (string, error) {
+	if i.signer != nil {
+		return i.signer.Sign(claims)
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(i.secret)
+}
+
+// JWKS returns the JSON Web Key Set advertising the signer's PUBLIC key —
+// and nothing else. ok is false (and the payload empty) when the Issuer
+// runs the legacy HS256 path, in which case there is no key set to serve.
+func (i *Issuer) JWKS() (json.RawMessage, bool) {
+	if i == nil || i.signer == nil {
+		return nil, false
+	}
+	return i.signer.JWKS(), true
+}
+
+// SigningAlgorithm reports the algorithm access tokens are signed with
+// ("EdDSA", "RS256" or the legacy "HS256"); used by boot logs and tests.
+func (i *Issuer) SigningAlgorithm() string {
+	if i.signer != nil {
+		return i.signer.Algorithm()
+	}
+	return "HS256"
 }
 
 // claimContext resolves the tenant_id and roles claims. When the store

@@ -67,7 +67,8 @@ func TestValidate(t *testing.T) {
 		{"bad port", func(c *Config) { c.App.Port = "99999" }, "MOTIVRA_PORT"},
 		{"unknown env", func(c *Config) { c.App.Env = "stagingx" }, "MOTIVRA_ENV"},
 		{"short secret in production", func(c *Config) { c.App.Env = EnvProduction; c.JWT.Secret = "short" }, "MOTIVRA_JWT_SECRET"},
-		{"short secret in staging", func(c *Config) { c.App.Env = EnvStaging; c.JWT.Secret = "" }, "MOTIVRA_JWT_SECRET"},
+		{"no verification keys in staging (ADR-0007)", func(c *Config) { c.App.Env = EnvStaging; c.JWT.Secret = "" }, "token verification keys"},
+		{"allow_hs256 without secret", func(c *Config) { c.App.Env = EnvStaging; c.JWT.Secret = ""; c.JWT.AllowHS256 = true }, "MOTIVRA_JWT_ALLOW_HS256 requires MOTIVRA_JWT_SECRET"},
 		{"legacy dev placeholder in production", func(c *Config) {
 			c.App.Env = EnvProduction
 			c.JWT.Secret = legacyDevJWTSecret
@@ -103,8 +104,25 @@ func TestProductionSecretLengthAccepted(t *testing.T) {
 	cfg := LoadForTest()
 	cfg.App.Env = EnvProduction
 	cfg.Database.URL = "postgres://localhost/motivra"
+	// ADR-0007 posture: a production verifier holds public keys (JWKS by
+	// default via Load()/NewValidatorFromConfig; explicit here because this
+	// is a hand-built config).
+	cfg.JWT.JWKSURL = DefaultJWKSURL
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("production config with 44-byte secret should validate, got %v", err)
+	}
+}
+
+// TestValidateMigrationEscapeHatch pins the explicit HS256 opt-in: a
+// staging/production deployment may keep the shared secret as its only
+// verification source when the migration flag is set (never by default).
+func TestValidateMigrationEscapeHatch(t *testing.T) {
+	cfg := LoadForTest()
+	cfg.App.Env = EnvProduction
+	cfg.Database.URL = "postgres://localhost/motivra"
+	cfg.JWT.AllowHS256 = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("HS256 migration posture should validate, got %v", err)
 	}
 }
 
