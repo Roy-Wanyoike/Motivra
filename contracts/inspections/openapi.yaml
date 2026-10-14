@@ -1,0 +1,868 @@
+openapi: 3.0.3
+info:
+  title: Motivra Inspections API
+  version: 1.0.0
+  description: |
+    Template-driven inspection sessions, GREEN/AMBER/RED findings, evidence
+    provenance and verifiable inspection reports.
+
+    A session is opened against the active system template for a vehicle
+    class and moves through a strictly linear four-state machine (CREATED,
+    IN_PROGRESS, SUBMITTED, REPORT_AVAILABLE) enforced server-side: illegal
+    moves answer 409 and every successful move is recorded in an append-only
+    transition log. Findings and evidence records are append-only and are
+    sealed once the session is submitted — corrections are new records, and
+    the newest record per template item wins at report assembly. Evidence
+    records carry provenance only (content hash, captured-at, captured-by,
+    uploaded flag); media storage is out of scope. Report assembly refuses a
+    session without evidence hashes, and every issued report freezes a
+    canonical content hash that `/report/verification` recomputes from the
+    live rows.
+
+    Reads are tenant-scoped from the verified access token (never client
+    input): organizational principals see their tenant's sessions, personal
+    principals see the sessions they inspected or that concern them as the
+    vehicle's customer, ADMIN/SUPER_ADMIN read across tenants. Invisible and
+    unknown resources both answer 404. Session work (start, findings,
+    evidence, submit, report) requires an inspection-staff role
+    (TECHNICIAN, GARAGE, DISPATCHER, ADMIN, SUPER_ADMIN).
+
+    Domain events publish on JetStream as `motivra.inspections.<aggregate>.<event>.v1`:
+    `session.created.v1`, `session.started.v1`, `session.submitted.v1`,
+    `report.issued.v1`.
+
+    All endpoints require a Bearer access token issued by the identity
+    service (HS256). Errors are RFC 7807-style `application/problem+json`.
+servers:
+  - url: /
+tags:
+  - name: sessions
+    description: Inspection session lifecycle, findings and evidence
+  - name: reports
+    description: Verifiable report assembly, retrieval and integrity
+  - name: templates
+    description: The system template registry per vehicle class
+security:
+  - bearerAuth: []
+paths:
+  /v1/inspections/sessions:
+    post:
+      operationId: createInspectionSession
+      summary: Create an inspection session
+      description: |
+        Resolves the active template for the vehicle class, freezes the
+        template snapshot onto the session and persists it in status
+        `CREATED`. The authenticated staff member becomes the inspector and
+        the tenant comes from the token claims — never from the body.
+        Publishes `session.created.v1`.
+      tags: [sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionInput'
+      responses:
+        '201':
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      operationId: listInspectionSessions
+      summary: List inspection sessions
+      description: |
+        Returns sessions visible to the caller's scope, newest first.
+        Requires an inspection-staff role (customers read through their
+        session/report links instead). All filters are optional.
+      tags: [sessions]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/SessionStatus'
+        - name: vehicle_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: job_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: Scoped session page (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/inspections/sessions/{sessionID}:
+    get:
+      operationId: getInspectionSession
+      summary: Fetch one inspection session
+      description: Answers 404 when the session is unknown or outside the caller's scope.
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/inspections/sessions/{sessionID}/start:
+    post:
+      operationId: startInspectionSession
+      summary: Start the inspection walk
+      description: |
+        Moves the session CREATED -> IN_PROGRESS and stamps `started_at`.
+        Only the session's inspector (or a control-plane operator) may start
+        it; findings and evidence are recordable only while IN_PROGRESS.
+        Publishes `session.started.v1`.
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      responses:
+        '200':
+          description: Updated session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/inspections/sessions/{sessionID}/findings:
+    post:
+      operationId: recordInspectionFinding
+      summary: Record a finding
+      description: |
+        Appends one item result to an IN_PROGRESS session. The item key must
+        belong to the session's template and the result/severity pair must
+        be one of the documented combinations (PASS/NOT_APPLICABLE carry
+        GREEN, FAIL/ATTENTION carry AMBER or RED). A corrected item is a NEW
+        record — the newest record per item wins at report assembly.
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordFindingInput'
+      responses:
+        '201':
+          description: Finding recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Finding'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      operationId: listInspectionFindings
+      summary: List a session's findings
+      description: Chronological finding log (oldest first), including superseded corrections.
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      responses:
+        '200':
+          description: Chronological findings (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Finding'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/inspections/sessions/{sessionID}/evidence:
+    post:
+      operationId: attachInspectionEvidence
+      summary: Attach an evidence reference
+      description: |
+        Appends one evidence provenance record to an IN_PROGRESS session:
+        the lowercase hex SHA-256 of the media content, when and by whom it
+        was captured and the client-attested upload state. No media bytes
+        travel here. An optional `finding_id` links the evidence to a
+        finding of the same session (a RED finding must be linked to at
+        least one evidence record before the report can assemble).
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttachEvidenceInput'
+      responses:
+        '201':
+          description: Evidence record attached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evidence'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      operationId: listInspectionEvidence
+      summary: List a session's evidence records
+      description: Chronological evidence provenance (oldest first).
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      responses:
+        '200':
+          description: Chronological evidence (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Evidence'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/inspections/sessions/{sessionID}/submit:
+    post:
+      operationId: submitInspectionSession
+      summary: Submit and seal the session
+      description: |
+        Attests the inspection is complete: the session moves
+        IN_PROGRESS -> SUBMITTED and findings plus evidence are sealed (the
+        database refuses further writes). The report-integrity preconditions
+        are validated first, so a refusal is a 422 naming every violated
+        precondition (missing required findings, no evidence records, RED
+        findings without evidence). Publishes `session.submitted.v1`.
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      responses:
+        '200':
+          description: Submitted session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/inspections/sessions/{sessionID}/report:
+    post:
+      operationId: issueInspectionReport
+      summary: Assemble and issue the verifiable report
+      description: |
+        Snapshots the newest finding per item and the evidence set, hashes
+        the canonical form into `content_hash`, inserts the append-only
+        report and moves the session SUBMITTED -> REPORT_AVAILABLE. The
+        request body is optional (an empty body issues the report with no
+        notes). Publishes `report.issued.v1`.
+      tags: [reports]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueReportInput'
+      responses:
+        '201':
+          description: Issued report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      operationId: getInspectionReport
+      summary: Fetch the session's report
+      description: Returns the latest report version unless `version` is given.
+      tags: [reports]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: The report with its frozen snapshots.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/inspections/sessions/{sessionID}/report/verification:
+    get:
+      operationId: verifyInspectionReport
+      summary: Recompute the report's integrity
+      description: |
+        Recomputes the canonical hash from the live session, findings and
+        evidence rows and compares it with the frozen report. Always answers
+        200: a tampered report verifies as `verified: false` rather than
+        erroring, so the endpoint can back an independent audit surface.
+      tags: [reports]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: The verification outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportVerification'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/inspections/templates:
+    get:
+      operationId: listInspectionTemplates
+      summary: List the system template registry
+      description: |
+        Returns the registered system templates (one active template per
+        vehicle class), optionally filtered by `vehicle_class`. Sessions and
+        reports snapshot the resolved template, so later registry changes
+        never reinterpret a historical inspection.
+      tags: [templates]
+      parameters:
+        - name: vehicle_class
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/VehicleClass'
+      responses:
+        '200':
+          description: Registered templates (possibly filtered).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Template'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/inspections/templates/{templateID}:
+    get:
+      operationId: getInspectionTemplate
+      summary: Fetch one registered template
+      tags: [templates]
+      parameters:
+        - $ref: '#/components/parameters/TemplateID'
+      responses:
+        '200':
+          description: The template with its items.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+components:
+  parameters:
+    SessionID:
+      name: sessionID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TemplateID:
+      name: templateID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Unauthorized:
+      description: Missing, invalid or expired access token.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Authenticated but the role is not allowed for this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource does not exist or is outside the caller's scope.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: State conflict (illegal state-machine move, sealed session, version mismatch).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Request body or query parameters are invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    VehicleClass:
+      type: string
+      enum:
+        - MOTORCYCLE
+        - SEDAN
+        - SUV
+        - PICKUP
+        - TRUCK
+        - BUS
+      description: The vehicle classification a template is written for.
+    SessionStatus:
+      type: string
+      enum:
+        - CREATED
+        - IN_PROGRESS
+        - SUBMITTED
+        - REPORT_AVAILABLE
+      description: |
+        The strictly linear session lifecycle: CREATED -> IN_PROGRESS ->
+        SUBMITTED -> REPORT_AVAILABLE. There is deliberately no way back — a
+        corrected inspection is a NEW session.
+    FindingResult:
+      type: string
+      enum: [PASS, FAIL, ATTENTION, NOT_APPLICABLE]
+      description: The recorded outcome for one template item.
+    Severity:
+      type: string
+      enum: [GREEN, AMBER, RED]
+      description: |
+        The traffic-light rating: GREEN is healthy, AMBER needs monitoring or
+        near-term attention, RED is unsafe or unacceptable. PASS and
+        NOT_APPLICABLE carry GREEN only; FAIL and ATTENTION carry AMBER or
+        RED.
+    EvidenceKind:
+      type: string
+      enum: [PHOTO, READING, DOCUMENT]
+      description: The kind of media an evidence record certifies.
+    CreateSessionInput:
+      type: object
+      required: [vehicle_class]
+      properties:
+        vehicle_class:
+          $ref: '#/components/schemas/VehicleClass'
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Cross-domain reference to the vehicle (no FK).
+        job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Cross-domain reference to the originating job (no FK).
+        customer_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The vehicle owner's user id; the owner's read path.
+    RecordFindingInput:
+      type: object
+      required: [item_key, result, severity]
+      properties:
+        item_key:
+          type: string
+          minLength: 1
+          description: The template item being reported.
+        result:
+          $ref: '#/components/schemas/FindingResult'
+        severity:
+          $ref: '#/components/schemas/Severity'
+        notes:
+          type: string
+          maxLength: 2000
+          description: Free-text observation. Hashed (never inlined) into the report's canonical form.
+    AttachEvidenceInput:
+      type: object
+      required: [kind, content_hash, captured_at]
+      properties:
+        kind:
+          $ref: '#/components/schemas/EvidenceKind'
+        content_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Lowercase hex SHA-256 of the media bytes. Media storage is out of scope.
+        captured_at:
+          type: string
+          format: date-time
+          description: When the media was captured (bounded future skew is refused).
+        finding_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Links the evidence to a finding of the same session.
+        uploaded:
+          type: boolean
+          default: false
+          description: Client-attested upload state.
+        notes:
+          type: string
+          maxLength: 2000
+    IssueReportInput:
+      type: object
+      properties:
+        notes:
+          type: string
+          maxLength: 2000
+    TemplateItem:
+      type: object
+      properties:
+        key:
+          type: string
+          description: Stable machine identifier findings reference.
+        label:
+          type: string
+          description: Human-readable checklist text.
+        required:
+          type: boolean
+          description: Whether a finding for this item is mandatory before submission.
+    Template:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        vehicle_class:
+          $ref: '#/components/schemas/VehicleClass'
+        name:
+          type: string
+        version:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TemplateItem'
+        active:
+          type: boolean
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+        job_id:
+          type: string
+          format: uuid
+          nullable: true
+        customer_id:
+          type: string
+          format: uuid
+          nullable: true
+        vehicle_class:
+          $ref: '#/components/schemas/VehicleClass'
+        template_id:
+          type: string
+          format: uuid
+        template_name:
+          type: string
+        template_version:
+          type: integer
+        inspector_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/SessionStatus'
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+        reported_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Finding:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        item_key:
+          type: string
+        result:
+          $ref: '#/components/schemas/FindingResult'
+        severity:
+          $ref: '#/components/schemas/Severity'
+        notes:
+          type: string
+        recorded_by:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    Evidence:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        finding_id:
+          type: string
+          format: uuid
+          nullable: true
+        kind:
+          $ref: '#/components/schemas/EvidenceKind'
+        content_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        captured_at:
+          type: string
+          format: date-time
+        captured_by:
+          type: string
+          format: uuid
+          nullable: true
+        uploaded:
+          type: boolean
+        notes:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    Report:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+          description: The report's version within its session.
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+        job_id:
+          type: string
+          format: uuid
+          nullable: true
+        inspector_id:
+          type: string
+          format: uuid
+        template_id:
+          type: string
+          format: uuid
+        template_name:
+          type: string
+        template_version:
+          type: integer
+        findings:
+          type: array
+          description: The frozen findings snapshot (newest record per item).
+          items:
+            type: object
+        evidence:
+          type: array
+          description: The frozen evidence snapshot (content hashes and provenance).
+          items:
+            type: object
+        findings_count:
+          type: integer
+        evidence_count:
+          type: integer
+        content_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 of the canonical report input (backend/inspections/report.go).
+        issued_by:
+          type: string
+          format: uuid
+          nullable: true
+        notes:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    ReportVerification:
+      type: object
+      properties:
+        report_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        verified:
+          type: boolean
+          description: True only when every check below passed.
+        hash_match:
+          type: boolean
+        findings_match:
+          type: boolean
+        evidence_match:
+          type: boolean
+        template_match:
+          type: boolean
+        findings_checked:
+          type: integer
+        evidence_checked:
+          type: integer
+        stored_hash:
+          type: string
+        recomputed_hash:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        errors:
+          type: array
+          description: Field-level validation issues when present.
+          items:
+            type: object
