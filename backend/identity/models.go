@@ -73,13 +73,15 @@ func (u User) verificationSatisfied() bool {
 // Session is a refresh-token session row. RefreshTokenHash is the hex-encoded
 // keyed HMAC-SHA256 digest of the opaque client refresh token; the token
 // itself is never persisted. RevokedAt is non-nil once the session (or its
-// token via rotation) is no longer usable.
+// token via rotation) is no longer usable. CreatedAt drives the newest-first
+// ordering of the session management API (issue #87).
 type Session struct {
 	ID                uuid.UUID
 	UserID            uuid.UUID
 	RefreshTokenHash  string
 	DeviceName        string
 	IPAddress         string
+	CreatedAt         time.Time
 	ExpiresAt         time.Time
 	AbsoluteExpiresAt time.Time // rotation never extends this (issue #81)
 	RevokedAt         *time.Time

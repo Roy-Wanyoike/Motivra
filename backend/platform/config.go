@@ -53,13 +53,39 @@ type TemporalConfig struct {
 	Namespace string // MOTIVRA_TEMPORAL_NAMESPACE
 }
 
-// JWTConfig holds access-token validation settings. Services validate but
-// never issue tokens; issuance belongs exclusively to the identity service
-// (ADR-0004).
+// JWTConfig holds access-token settings. Services VALIDATE only; issuance
+// belongs exclusively to the identity service (ADR-0004). Since ADR-0007
+// (issue #87) the signing keys are asymmetric (EdDSA/RS256): the issuer
+// holds MOTIVRA_JWT_PRIVATE_KEY_FILE, verifying services hold ONLY public
+// keys via the JWKS endpoint (MOTIVRA_JWT_JWKS_URL) or a distributed key
+// file (MOTIVRA_JWT_PUBLIC_KEY_FILE). The legacy shared secret remains
+// (a) the opaque-token digest key on the issuer and (b) the explicitly
+// flagged HS256 migration path (MOTIVRA_JWT_ALLOW_HS256) — it is never
+// required on verifiers.
 type JWTConfig struct {
-	Secret   string // MOTIVRA_JWT_SECRET (>= 32 bytes outside development/test)
+	Secret   string // MOTIVRA_JWT_SECRET (issuer digest key; legacy HS256 only behind the migration flag)
 	Issuer   string // MOTIVRA_JWT_ISSUER
 	Audience string // MOTIVRA_JWT_AUDIENCE
+
+	// PrivateKeyFile is the PEM private key (Ed25519 PKCS#8 or RSA
+	// PKCS#1/PKCS#8) of the ISSUER. Required in staging/production unless
+	// the HS256 migration flag is set; development generates an ephemeral
+	// Ed25519 key when unset.
+	PrivateKeyFile string // MOTIVRA_JWT_PRIVATE_KEY_FILE
+	// KeyID optionally overrides the derived kid for the signing key.
+	KeyID string // MOTIVRA_JWT_KEY_ID
+
+	// JWKSURL is the issuer's /.well-known/jwks.json for VERIFIERS;
+	// DefaultJWKSURL (the compose topology) applies when unset outside test.
+	JWKSURL string // MOTIVRA_JWT_JWKS_URL
+	// PublicKeyFile is a static distributed public key for verifiers that
+	// cannot reach the JWKS endpoint.
+	PublicKeyFile string // MOTIVRA_JWT_PUBLIC_KEY_FILE
+
+	// AllowHS256 is the explicit migration opt-in: accept/issue legacy
+	// HS256 tokens with the shared secret in addition to (or, for the
+	// issuer, instead of) asymmetric keys. Defaults false everywhere.
+	AllowHS256 bool // MOTIVRA_JWT_ALLOW_HS256
 }
 
 // legacyDevJWTSecret is the historical development placeholder that used to
@@ -128,9 +154,14 @@ func Load() Config {
 			Namespace: envOr("MOTIVRA_TEMPORAL_NAMESPACE", "default"),
 		},
 		JWT: JWTConfig{
-			Secret:   os.Getenv("MOTIVRA_JWT_SECRET"),
-			Issuer:   envOr("MOTIVRA_JWT_ISSUER", "motivra-identity"),
-			Audience: envOr("MOTIVRA_JWT_AUDIENCE", "motivra"),
+			Secret:         os.Getenv("MOTIVRA_JWT_SECRET"),
+			Issuer:         envOr("MOTIVRA_JWT_ISSUER", "motivra-identity"),
+			Audience:       envOr("MOTIVRA_JWT_AUDIENCE", "motivra"),
+			PrivateKeyFile: os.Getenv("MOTIVRA_JWT_PRIVATE_KEY_FILE"),
+			KeyID:          os.Getenv("MOTIVRA_JWT_KEY_ID"),
+			JWKSURL:        os.Getenv("MOTIVRA_JWT_JWKS_URL"),
+			PublicKeyFile:  os.Getenv("MOTIVRA_JWT_PUBLIC_KEY_FILE"),
+			AllowHS256:     envBool("MOTIVRA_JWT_ALLOW_HS256", false),
 		},
 		OTel: OTelConfig{
 			Endpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
@@ -146,10 +177,12 @@ func Load() Config {
 
 // Validate aggregates every configuration problem into a single error so an
 // operator sees all missing values at once instead of one boot failure at a
-// time. Rules: database URL required except in test; JWT secret required and
-// at least 32 bytes in staging and production and refused when it is the
-// historical public development placeholder in every non-test environment;
-// port must be numeric in range.
+// time. Rules: database URL required except in test; a configured JWT secret
+// must be at least 32 bytes in staging and production and the historical
+// public development placeholder is refused in every non-test environment;
+// non-test deployments must hold at least one token-verification key source
+// (asymmetric JWKS/public key by default, HS256 behind the explicit
+// migration flag); port must be numeric in range.
 func (c Config) Validate() error {
 	var problems []string
 
@@ -175,12 +208,26 @@ func (c Config) Validate() error {
 			problems = append(problems, "MOTIVRA_JWT_SECRET must not be the historical development placeholder (generate one: openssl rand -base64 48)")
 		}
 	default: // staging, production
-		if len(c.JWT.Secret) < 32 {
+		// The shared secret is no longer required on verifiers (ADR-0007):
+		// they hold public keys only. When one IS configured it is still
+		// security-sensitive (issuer digest key / legacy HS256), so the
+		// strength and placeholder rules apply.
+		if c.JWT.Secret != "" && len(c.JWT.Secret) < 32 {
 			problems = append(problems, fmt.Sprintf("MOTIVRA_JWT_SECRET must be at least 32 bytes in %s", c.App.Env))
 		}
 		if c.JWT.Secret == legacyDevJWTSecret {
 			problems = append(problems, "MOTIVRA_JWT_SECRET must not be the historical development placeholder")
 		}
+		// ADR-0007: every non-test deployment must hold at least one token
+		// verification key source. The target posture is asymmetric
+		// (JWKS or distributed public key); the shared secret verifies
+		// tokens only behind the explicit migration flag.
+		if c.JWT.JWKSURL == "" && c.JWT.PublicKeyFile == "" && !(c.JWT.AllowHS256 && c.JWT.Secret != "") {
+			problems = append(problems, "token verification keys are required in "+c.App.Env+": set MOTIVRA_JWT_JWKS_URL or MOTIVRA_JWT_PUBLIC_KEY_FILE (or MOTIVRA_JWT_ALLOW_HS256=1 with MOTIVRA_JWT_SECRET for the documented migration window)")
+		}
+	}
+	if c.JWT.AllowHS256 && c.JWT.Secret == "" && c.App.Env != EnvTest {
+		problems = append(problems, "MOTIVRA_JWT_ALLOW_HS256 requires MOTIVRA_JWT_SECRET (the legacy HS256 path is the shared secret)")
 	}
 	if c.OTel.Enabled && c.OTel.Endpoint == "" {
 		problems = append(problems, "OTEL_EXPORTER_OTLP_ENDPOINT is required when OTEL tracing is enabled")

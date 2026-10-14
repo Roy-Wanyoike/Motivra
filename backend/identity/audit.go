@@ -18,6 +18,11 @@ const (
 	ActionSessionRevoked   = "identity.session.revoked"
 	ActionRoleGranted      = "identity.role.granted"
 
+	// Session management API (issue #87): revoked_all fires once per
+	// revoke-all request with the count in its metadata; single revocations
+	// through the API reuse ActionSessionRevoked with a via marker.
+	ActionSessionRevokedAll = "identity.session.revoked_all"
+
 	// Password lifecycle (issue #86): the breach-check note is the fail-open
 	// record required when the ADR-0004 breached-password check could not
 	// complete; password_changed covers the authenticated change flow.

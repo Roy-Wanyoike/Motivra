@@ -1,6 +1,8 @@
 // Command identity is the Motivra identity service: authentication
-// (register/login/refresh/logout), user profiles, admin account listing and
-// HS256 access-token issuance over the identity domain's PostgreSQL tables.
+// (register/login/refresh/logout), session management, user profiles,
+// admin account listing, asymmetric access-token issuance (EdDSA/RS256
+// with a JWKS endpoint — ADR-0007) and the Redis-backed auth rate limiter
+// over the identity domain's PostgreSQL tables.
 package main
 
 import (
@@ -9,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/Roy-Wanyoike/Motivra/backend/identity"
 	identitymigrations "github.com/Roy-Wanyoike/Motivra/backend/migrations/identity"
@@ -85,17 +89,68 @@ func main() {
 		os.Exit(1)
 	}
 
-	issuer := identity.NewIssuer(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience,
-		identity.WithVerificationGrace(verificationCfg.Grace))
+	// Identity is the issuer: the opaque-token digest key (refresh and
+	// verification token HMACs, ADR-0004) must be present in every
+	// environment. Verifier services never receive it (ADR-0007).
+	if cfg.JWT.Secret == "" {
+		logger.Error("identity service requires MOTIVRA_JWT_SECRET (it keys the opaque-token digests)")
+		os.Exit(1)
+	}
+
+	// Token signing (ADR-0007, issue #87): asymmetric EdDSA/RS256 by
+	// default. The private key loads from MOTIVRA_JWT_PRIVATE_KEY_FILE;
+	// development/test generate an ephemeral Ed25519 key when no file is
+	// configured (public keys are served over JWKS, so verifier replicas
+	// re-discover them). Staging/production refuse ephemeral keys; the
+	// legacy HS256 path requires the explicit MOTIVRA_JWT_ALLOW_HS256
+	// migration flag.
+	var signer *platform.JWTSigner
+	if !cfg.JWT.AllowHS256 {
+		var err error
+		signer, err = platform.NewSignerFromConfig(cfg)
+		if err != nil {
+			logger.Error("token signer unavailable", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("asymmetric token signing active", "alg", signer.Algorithm(), "kid", signer.KID())
+	} else {
+		logger.Warn("legacy HS256 token signing enabled via MOTIVRA_JWT_ALLOW_HS256",
+			"note", "migration window only: verifiers still hold signing material (ADR-0007)")
+	}
+	var issuer *identity.Issuer
+	if signer != nil {
+		issuer = identity.NewIssuer(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience,
+			identity.WithVerificationGrace(verificationCfg.Grace), identity.WithSigner(signer))
+	} else {
+		issuer = identity.NewIssuer(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience,
+			identity.WithVerificationGrace(verificationCfg.Grace))
+	}
 	svc := identity.NewService(store, issuer, publisher,
 		identity.WithTrustForwarded(cfg.TrustForwarded),
 		identity.WithPasswordBreacher(breacher, breachCfg.FailClosed),
 		identity.WithVerification(verificationCfg),
 	)
-	// Per-IP throttle on the public auth endpoints (0 disables; off in tests).
-	var authLimiter *platform.RateLimiter
+	// Per-IP throttle on the public auth endpoints (0 disables; off in
+	// tests). With MOTIVRA_REDIS_URL the limit is the shared,
+	// cross-instance sliding window (issue #87); without it the limiter
+	// falls back to the in-process fixed window (single-instance
+	// deployments). Runtime Redis errors fail OPEN either way.
+	var authLimiter platform.AuthLimiter
+	var redisClient *redis.Client
 	if cfg.AuthRateLimitRPM > 0 {
-		authLimiter = platform.NewRateLimiter(cfg.AuthRateLimitRPM)
+		if cfg.Redis.URL != "" {
+			ropts, err := redis.ParseURL(cfg.Redis.URL)
+			if err != nil {
+				logger.Error("redis URL invalid", "error", err)
+				os.Exit(1)
+			}
+			redisClient = redis.NewClient(ropts)
+			authLimiter = platform.NewRedisRateLimiter(redisClient, cfg.App.Name, cfg.AuthRateLimitRPM,
+				platform.WithLimiterMetrics(metrics.Registry()),
+				platform.WithLimiterLogger(logger))
+		} else {
+			authLimiter = platform.NewRateLimiter(cfg.AuthRateLimitRPM)
+		}
 	}
 
 	cleanups := []func(context.Context) error{
@@ -104,6 +159,9 @@ func main() {
 	if publisher != nil {
 		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
 	}
+	if redisClient != nil {
+		cleanups = append(cleanups, func(context.Context) error { return redisClient.Close() })
+	}
 	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metrics.Handler)
 	if err != nil {
 		logger.Error("metrics listener unavailable", "error", err, "addr", cfg.MetricsAddr)
@@ -111,14 +169,34 @@ func main() {
 	}
 	cleanups = append(cleanups, stopMetricsSrv, metrics.Stop, stopTracing)
 
-	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
-	srv := platform.NewServer(cfg, logger,
+	// Identity also validates tokens on its own protected routes. With a
+	// signer it verifies against the signer's PUBLIC key — the private
+	// half never enters the validator. Legacy mode keeps the shared
+	// secret (migration window only).
+	var validator *platform.JWTValidator
+	if signer != nil {
+		validator = platform.NewValidator(
+			platform.WithValidatorIssuerAudience(cfg.JWT.Issuer, cfg.JWT.Audience),
+			platform.WithPublicKeyPEM(signer.KID(), signer.PublicKey()),
+		)
+	} else {
+		validator = platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
+	}
+	srvOpts := []platform.ServerOption{
 		platform.WithChecker("database", func(ctx context.Context) error {
 			return pool.Ping(ctx)
 		}),
 		platform.WithMiddleware(platform.AuthMiddleware(validator)),
 		platform.WithMiddleware(metrics.HTTP.Middleware),
-	)
+	}
+	if redisClient != nil {
+		// Rate-limit store health is public posture: a degraded Redis
+		// means the limiter is failing open until it returns.
+		srvOpts = append(srvOpts, platform.WithChecker("redis", func(ctx context.Context) error {
+			return redisClient.Ping(ctx).Err()
+		}))
+	}
+	srv := platform.NewServer(cfg, logger, srvOpts...)
 	identity.Routes(srv.Router, svc, authLimiter)
 
 	httpSrv := &http.Server{

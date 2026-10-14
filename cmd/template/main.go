@@ -71,7 +71,15 @@ func main() {
 	}
 	cleanups = append(cleanups, stopMetricsSrv, metrics.Stop, stopTracing)
 
-	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
+	// Token verification (ADR-0007, issue #87): public keys only — JWKS
+	// from the identity service by default, or a distributed key file. The
+	// legacy HS256 secret verifies tokens only behind the explicit
+	// MOTIVRA_JWT_ALLOW_HS256 migration flag.
+	validator, err := platform.NewValidatorFromConfig(cfg)
+	if err != nil {
+		logger.Error("token validator unavailable", "error", err)
+		os.Exit(1)
+	}
 	opts = append(opts, platform.WithMiddleware(platform.AuthMiddleware(validator)))
 	srv := platform.NewServer(cfg, logger, opts...)
 	srv.Router.Get("/v1/ping", platform.RequireAuthenticated(func(w http.ResponseWriter, r *http.Request) {

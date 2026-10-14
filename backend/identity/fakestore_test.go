@@ -136,6 +136,9 @@ func (f *fakeStore) GetRoleGrants(_ context.Context, userID uuid.UUID) ([]RoleGr
 func (f *fakeStore) CreateSession(_ context.Context, s Session) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = time.Now()
+	}
 	f.sessions[s.ID] = s
 	f.byRefresh[s.RefreshTokenHash] = s.ID
 	return nil
@@ -150,6 +153,34 @@ func (f *fakeStore) GetSessionByRefreshHash(_ context.Context, hash string) (Ses
 		return Session{}, ErrUserNotFound
 	}
 	return f.sessions[id], nil
+}
+
+// GetSessionByID returns the session with the given id (issue #87 API).
+func (f *fakeStore) GetSessionByID(_ context.Context, id uuid.UUID) (Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[id]
+	if !ok {
+		return Session{}, ErrUserNotFound
+	}
+	return s, nil
+}
+
+// ListUserSessions returns every session of the user, newest first
+// (revoked ones included), like the SQL store's ordering (issue #87 API).
+func (f *fakeStore) ListUserSessions(_ context.Context, userID uuid.UUID) ([]Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]Session, 0, len(f.sessions))
+	for _, s := range f.sessions {
+		if s.UserID == userID {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID.String() > out[j].ID.String()
+	})
+	return out, nil
 }
 
 // RevokeSession marks the session revoked; unknown ids are not found.

@@ -45,9 +45,20 @@ func main() {
 	}
 	cleanups := []func(context.Context) error{stopMetricsSrv, metrics.Stop, stopTracing}
 
-	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
+	// Token verification (ADR-0007, issue #87): public keys only — JWKS
+	// from the identity service by default, or a distributed key file. The
+	// legacy HS256 secret verifies tokens only behind the explicit
+	// MOTIVRA_JWT_ALLOW_HS256 migration flag.
+	validator, err := platform.NewValidatorFromConfig(cfg)
+	if err != nil {
+		logger.Error("token validator unavailable", "error", err)
+		os.Exit(1)
+	}
 	srv := platform.NewServer(cfg, logger,
 		platform.WithChecker("engine", func(context.Context) error { return nil }),
+		// JWKS readiness: a verifier that cannot load the issuer key set
+		// refuses every token — surface that on /readyz (ADR-0007).
+		platform.WithChecker("jwks", validator.ReadyCheck),
 		platform.WithMiddleware(platform.AuthMiddleware(validator)),
 		platform.WithMiddleware(metrics.HTTP.Middleware),
 	)

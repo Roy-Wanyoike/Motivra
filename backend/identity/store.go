@@ -40,6 +40,13 @@ type SessionStore interface {
 	// GetSessionByRefreshHash returns the session owning the given
 	// hex-encoded HMAC-SHA256 refresh-token digest.
 	GetSessionByRefreshHash(ctx context.Context, hash string) (Session, error)
+	// GetSessionByID returns the session with the given id, or
+	// ErrUserNotFound when none matches (issue #87 session API).
+	GetSessionByID(ctx context.Context, id uuid.UUID) (Session, error)
+	// ListUserSessions returns every session of the user, newest first
+	// (issue #87 session management API). Revoked sessions are included
+	// so clients can render past devices.
+	ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error)
 	// RevokeSession marks the session revoked (sets revoked_at).
 	RevokeSession(ctx context.Context, id uuid.UUID) error
 	// GetUser returns the user with roles loaded.
@@ -365,9 +372,9 @@ func (s *PostgresStore) CreateSession(ctx context.Context, sess Session) error {
 func (s *PostgresStore) GetSessionByRefreshHash(ctx context.Context, hash string) (Session, error) {
 	var sess Session
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, user_id, refresh_token_hash, device_name, ip_address, expires_at, absolute_expires_at, revoked_at
+		`SELECT id, user_id, refresh_token_hash, device_name, ip_address, created_at, expires_at, absolute_expires_at, revoked_at
                  FROM sessions WHERE refresh_token_hash = $1`, hash,
-	).Scan(&sess.ID, &sess.UserID, &sess.RefreshTokenHash, &sess.DeviceName, &sess.IPAddress, &sess.ExpiresAt, &sess.AbsoluteExpiresAt, &sess.RevokedAt)
+	).Scan(&sess.ID, &sess.UserID, &sess.RefreshTokenHash, &sess.DeviceName, &sess.IPAddress, &sess.CreatedAt, &sess.ExpiresAt, &sess.AbsoluteExpiresAt, &sess.RevokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Session{}, ErrUserNotFound
@@ -375,6 +382,50 @@ func (s *PostgresStore) GetSessionByRefreshHash(ctx context.Context, hash string
 		return Session{}, fmt.Errorf("get session by refresh hash: %w", err)
 	}
 	return sess, nil
+}
+
+// GetSessionByID returns the session with the given id, or ErrUserNotFound
+// when none matches (issue #87 session management API).
+func (s *PostgresStore) GetSessionByID(ctx context.Context, id uuid.UUID) (Session, error) {
+	var sess Session
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, refresh_token_hash, device_name, ip_address, created_at, expires_at, absolute_expires_at, revoked_at
+                 FROM sessions WHERE id = $1`, id,
+	).Scan(&sess.ID, &sess.UserID, &sess.RefreshTokenHash, &sess.DeviceName, &sess.IPAddress, &sess.CreatedAt, &sess.ExpiresAt, &sess.AbsoluteExpiresAt, &sess.RevokedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Session{}, ErrUserNotFound
+		}
+		return Session{}, fmt.Errorf("get session by id: %w", err)
+	}
+	return sess, nil
+}
+
+// ListUserSessions returns every session of the user (revoked ones
+// included), newest first (issue #87 session management API).
+func (s *PostgresStore) ListUserSessions(ctx context.Context, userID uuid.UUID) ([]Session, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, user_id, refresh_token_hash, device_name, ip_address, created_at, expires_at, absolute_expires_at, revoked_at
+                 FROM sessions WHERE user_id = $1 ORDER BY created_at DESC, id`, userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list user sessions: %w", err)
+	}
+	defer rows.Close()
+
+	sessions := []Session{}
+	for rows.Next() {
+		var sess Session
+		if err := rows.Scan(&sess.ID, &sess.UserID, &sess.RefreshTokenHash, &sess.DeviceName, &sess.IPAddress,
+			&sess.CreatedAt, &sess.ExpiresAt, &sess.AbsoluteExpiresAt, &sess.RevokedAt); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		sessions = append(sessions, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list user sessions: %w", err)
+	}
+	return sessions, nil
 }
 
 // RevokeSession sets revoked_at on the session with the given id. It is
