@@ -263,7 +263,145 @@ Rules:
 
 ---
 
-## 6. Troubleshooting
+## 6. Production deployment
+
+The compose app stack is the deployment surface. A production run differs
+from a local one in four ways: real secrets, no host-exposed data layer,
+TLS at the edge, and monitoring attached.
+
+### Required environment (the `.env` contract)
+
+`cp .env.example .env`, then set **at minimum**:
+
+| Variable | Requirement |
+| --- | --- |
+| `POSTGRES_PASSWORD` | generated (`openssl rand -base64 24`) — compose refuses to boot without it |
+| `MOTIVRA_JWT_SECRET` | generated (`openssl rand -base64 48`), ≥32 bytes; validated in staging/production and the historical dev placeholder is refused everywhere |
+| `MOTIVRA_ENV` | `production` (enables the strict secret rules and OTEL-by-default) |
+| `MOTIVRA_OTEL_ENABLED` + `OTEL_EXPORTER_OTLP_ENDPOINT` | `true` + `otel-collector:4317` once the observability stack runs |
+| `MOTIVRA_TRUST_FORWARDED` | `true` only when a reverse proxy fronts the services; otherwise audit IPs and rate-limit keys are spoofable |
+| `MOTIVRA_AUTH_RATE_LIMIT_RPM` | default 60; tune per expected traffic (0 disables — do not) |
+
+### Boot sequence
+
+1. Review the diff of `.env` against `.env.example` — no committed values.
+2. `docker compose -f docker-compose.app.yml up -d` — services wait for
+   postgres health, then apply their own migration chains at boot.
+3. Attach monitoring: `docker compose -f docker-compose.observability.yml up -d`.
+4. Wait for all four `/readyz` to return 200 (compose healthchecks gate on
+   readiness).
+5. Run the §4a smoke checklist against `127.0.0.1:<port>` from the host.
+6. Verify **zero demo data**: `make integrity-check` and confirm
+   `users`/`vehicles`/`jobs` counts match expectations for a fresh deploy
+   (a fresh deploy has 0 rows in every domain table).
+
+### TLS and the edge
+
+- All host ports are loopback-bound (#82). Put a reverse proxy (Caddy,
+  nginx, or a cloud LB) on the host for TLS termination and forward to
+  `127.0.0.1:8081-8084`.
+- The Vercel edge (for the customer app + `/v1/*` API paths) carries HSTS
+  preload and the security-header set; keep `vercel.json` and the proxy
+  headers in sync.
+- Rate limiting lives in the identity service; add edge-level limits
+  (per-IP connection/request caps) at the proxy for defense in depth.
+
+### Known deployment posture
+
+One shared Postgres cluster (ADR-0003) with per-domain migration chains;
+PostGIS required; Redis currently idle (rate limiting is in-process;
+Redis-backed distribution tracked in #87); Temporal intentionally absent
+from the stack yet.
+
+---
+
+## 7. Backup & DR
+
+Commands live in §5a (`make db-backup` / `make db-restore` /
+`make integrity-check`). This section defines the objectives.
+
+| Objective | Target | Mechanism |
+| --- | --- | --- |
+| RPO (max data loss) | 24 h with nightly backups; ~0 with managed PG PITR | nightly `make db-backup` to durable storage; managed Postgres WAL archiving recommended for production |
+| RTO (max downtime) | 30 min | restore into a fresh volume (`make db-restore`), `make integrity-check`, redeploy services |
+| Backup verification | every backup | restore into scratch + integrity check before considering it real |
+
+### Nightly backup (cron)
+
+```
+0 2 * * *  cd /srv/motivra && make db-backup && find ./backups -name '*.dump' -mtime +14 -delete
+```
+
+Ship `./backups` off-host (object storage) — a backup on the same host as
+the database is not a backup.
+
+### Restore procedure (tested path)
+
+1. Provision scratch: `docker run -d --name pg-restore-check -e
+   POSTGRES_PASSWORD=x -p 127.0.0.1:5499:5432 postgis/postgis:16-3.4`.
+2. `make db-restore FILE=<dump> DB_URL=postgres://...:5499/...` (requires
+   `I_UNDERSTAND_THIS_DROPS_DATA=1`).
+3. `make integrity-check DB_URL=...:5499/...` — all orphans zero, triggers
+   armed.
+4. Point the stack at the restored volume only after the check passes.
+
+### Disaster recovery
+
+- **Bad deploy:** redeploy previous image tag; migrations are additive
+  (each chain ships downs) — never downgrade schema without a reviewed
+  plan; additive migrations make forward-only recovery the default.
+- **Data corruption:** stop services, snapshot the volume for forensics,
+  restore latest verified backup, replay via §5a.
+- **Secret compromise:** rotate per §8, then follow §9.
+
+---
+
+## 8. Secrets rotation
+
+| Secret | Rotation trigger | Procedure | Impact |
+| --- | --- | --- | --- |
+| `MOTIVRA_JWT_SECRET` | quarterly, suspected compromise, team change | generate new 48-byte secret; update `.env`; rolling restart of all services during a low-traffic window | all access tokens die within one access TTL (15 min); refresh sessions remain valid (digests are keyed with the OLD secret — for full session invalidation rotate and purge sessions via §5a) |
+| `POSTGRES_PASSWORD` | quarterly, suspected compromise | change in Postgres (`ALTER USER`), update `.env`, restart the stack | brief downtime during restart |
+| TLS certificates | expiry | proxy-managed (ACME) | none if automated |
+| GitHub PAT | immediately on any exposure | regenerate in GitHub settings, update deploy secrets | CI/deploy pause until updated |
+
+Compromise-specific: after any suspected secret leak, rotate FIRST
+(sessions/tokens die), then investigate with §9 — never investigate on
+possibly-compromised credentials.
+
+---
+
+## 9. Incident response
+
+Severity skeleton (calibrate when on-call is staffed):
+
+| Level | Definition | Response |
+| --- | --- | --- |
+| SEV1 | Live customers blocked (all auth failing, data loss, confirmed breach) | immediate: mitigate (rollback/restart/rotate) → comms to affected users → postmortem within 72 h |
+| SEV2 | Degraded core flow (one service down with fallback, elevated 5xx) | same-day mitigation, root cause within 48 h |
+| SEV3 | No customer impact (redundancy issues, alert noise) | batch into the next work cycle |
+
+First-response checklist:
+
+1. **Identify**: Grafana golden-signals dashboard (§5) — which service,
+   which signal, since when. `ServiceDown`/`High5xxRate` alerts are the
+   tripwires.
+2. **Contain**: `docker compose -f docker-compose.app.yml restart <svc>`;
+   rollback via previous image if a deploy caused it.
+3. **Preserve**: `docker compose logs <svc> > incident-<date>.log` and a
+   volume snapshot BEFORE destructive actions.
+4. **Communicate**: note status in the incident channel; SEV1 requires
+   customer comms before the day ends.
+5. **Close**: postmortem for SEV1/2 — timeline, root cause, action items
+   filed as issues; update this runbook if procedures changed.
+
+Data-breach specific (DPA 2019 notification duties): involve the data
+controller/owner immediately; document scope via §5a integrity checks and
+audit_log review before notifying.
+
+---
+
+## 10. Troubleshooting
 
 | Symptom | Likely cause / fix |
 | --- | --- |
@@ -281,31 +419,45 @@ Rules:
 
 ---
 
-## 7. Known limitations
+## 11. Known limitations
 
-Be honest with stakeholders about what this runbook does **not** cover yet:
+Be honest with stakeholders about what this runbook does **not** cover yet
+(resolved items from the production-readiness pass are at the bottom):
 
-- **CI is not executable** — the GitHub Actions billing lock (issue #10)
-  means local gates (build/vet/test/lint, migration validation) are the
-  merge gate. No CI badge should be trusted until #10 is resolved.
+- **CI is blocked by the GitHub Actions billing lock (issue #10)** — the
+  workflow file is complete (DCO, lint, Go tests with Postgres, migration
+  validation, customer/technician app gates, gitleaks) and enabled, but
+  jobs fail at scheduling until the owner resolves billing. Local gates
+  remain the merge gate; no CI badge should be trusted until then.
 - **Helm charts / OpenTofu / Argo CD / canary deploys do not exist yet.**
-  The deployment surface is this Dockerfile + compose stack; Kubernetes
-  manifests, IaC and progressive delivery are future waves (see
-  `infrastructure/README.md` "Not yet" list and `docs/ROADMAP.md`).
-- **No TLS, domains or ingress** — everything binds plaintext HTTP on
-  localhost ports. Terminating TLS, DNS and real secrets management are
-  not configured.
+  The deployment surface is this Dockerfile + compose stack; Kubernetes,
+  IaC and progressive delivery are future waves (see `docs/ROADMAP.md`).
+- **TLS terminates at a reverse proxy you provide** — services bind
+  plaintext HTTP on loopback ports by design (#82); the edge (Vercel for
+  web + `/v1/*`) carries HSTS. Host-level TLS/DNS is an operator step
+  (§6).
 - **Temporal is out of the app stack** — dev profile only
   (`make dev-temporal`); no service currently dials Temporal in production
   topology.
-- **Redis env var is wired but idle** — no service consumes Redis yet.
-  NATS event publishing is wired (issue #28): identity/jobs/vehicles build a
-  JetStream publisher when `MOTIVRA_NATS_URL` is set and publish
-  `motivra.<domain>.<aggregate>.<event>.v1` envelopes per ADR-0002; with the
-  variable unset they run with a nil publisher. No domain consumes events yet
-  (consumers land with the notifications wave).
+- **Redis env var is wired but idle** — rate limiting is in-process
+  (#81); Redis-backed distributed limiting for horizontal scale is
+  tracked in #87. NATS event publishing is wired (issue #28): services
+  publish `motivra.<domain>.<aggregate>.<event>.v1` envelopes when
+  `MOTIVRA_NATS_URL` is set; no domain consumes events yet (notifications
+  wave).
 - **One shared database in the stack** — services run per-domain migration
   chains in one Postgres database; per-domain DB roles/isolation (ADR-0003
-  "own database role") are not yet provisioned.
+  "own database role") are tracked in #88.
 - **Seed covers identity/vehicles/jobs only** — domains without migration
   chains (garages, estimates, payments, ...) cannot be seeded.
+- **Observability storage is evaluation-grade** — container-local volumes
+  in the compose stack; mount durable storage and set retention before
+  relying on it (§5).
+
+Resolved by the production-readiness pass (#80–#85): demo-data gating,
+auth rate limiting, secret policy, internal metrics, fail-closed scoping,
+absolute session caps, append-only audit/transitions, backup/restore +
+retention + integrity tooling, RED metrics + log correlation +
+monitoring stack, security headers, loopback-bound ports, frontend CI
+jobs + secret scanning (pending billing), and this runbook's production
+sections plus docs/PII-HANDLING.md.
