@@ -137,6 +137,11 @@ type WebhookPayload struct {
 	TransactionID uuid.UUID
 	// ProviderRef is the provider-side transaction reference echoed back.
 	ProviderRef string
+	// ProviderReceipt is the provider's settlement identifier when the
+	// callback carries one (e.g. the M-Pesa MpesaReceiptNumber). Empty on
+	// callbacks without it — the ledger then keeps the receipt it
+	// already holds (reconciliation stamps "SBXR-..." style receipts).
+	ProviderReceipt string
 	// AmountMinor/Currency are the provider-attested values; AmountMinor
 	// must equal the ledger transaction's amount exactly.
 	AmountMinor int64

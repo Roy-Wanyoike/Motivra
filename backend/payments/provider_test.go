@@ -224,12 +224,14 @@ func TestDarajaWebhookNormalization(t *testing.T) {
 
 	success := []byte(`{"Body":{"stkCallback":{"MerchantRequestID":"29115-34620561-1","` +
 		`CheckoutRequestID":"ws_CO_191220191020363925","ResultCode":0,"ResultDesc":"The service request is processed successfully.",` +
-		`"CallbackMetadata":{"Item":[{"Name":"Amount","Value":1500},{"Name":"MpesaReceiptNumber","Value":"NLJ7RT61SV"},` +
+		`"CallbackMetadata":{"Item":[{"Name":"Amount","Value":15},{"Name":"MpesaReceiptNumber","Value":"NLJ7RT61SV"},` +
 		`{"Name":"TransactionDate","Value":"20191219102115"},{"Name":"PhoneNumber","Value":254708374149}]}}}}`)
 	payload, err := p.WebhookEvent(signedHeader(t, "daraja-webhook-secret", success, now), success, now)
 	require.NoError(t, err)
 	assert.Equal(t, WebhookEventTransactionSucceeded, payload.Event)
 	assert.Equal(t, "ws_CO_191220191020363925", payload.ProviderRef)
+	// The callback Amount is WHOLE KES (15); the adapter scales it to the
+	// ledger's minor units so the attested-amount check can compare exactly.
 	assert.Equal(t, int64(1500), payload.AmountMinor)
 	// PII minimization: the normalized payload carries no phone number.
 	wire, err := json.Marshal(payload)

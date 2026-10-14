@@ -181,16 +181,28 @@ type Service struct {
 	providers map[string]Provider
 	publisher platform.Publisher
 	metrics   *Metrics
+
+	// DefaultProvider names the adapter initiations select when the
+	// caller leaves the provider unset ("sandbox" unless the deployment
+	// configured Daraja and asked for it to be the default; cmd wires
+	// MOTIVRA_PAYMENTS_PROVIDER). Per-intent providers are recorded on
+	// the intent, so webhooks, queries and refunds always use the
+	// adapter the payment was initiated with.
+	DefaultProvider string
 }
 
 // NewService returns a Service over store with the named providers.
 // publisher and metrics may be nil.
 func NewService(store Store, providers map[string]Provider, publisher platform.Publisher, metrics *Metrics) *Service {
-	return &Service{store: store, providers: providers, publisher: publisher, metrics: metrics}
+	return &Service{store: store, providers: providers, publisher: publisher, metrics: metrics, DefaultProvider: ProviderSandbox}
 }
 
-// Provider returns the named adapter, or the sandbox when name is empty.
+// Provider returns the named adapter, or the service's default when name
+// is empty.
 func (s *Service) Provider(name string) (Provider, error) {
+	if name == "" {
+		name = s.DefaultProvider
+	}
 	if name == "" {
 		name = "sandbox"
 	}
@@ -452,7 +464,7 @@ func (s *Service) HandleWebhook(ctx context.Context, providerName string, header
 		TransactionID:   tx.ID,
 		NewTxStatus:     newTxStatus,
 		NewIntentStatus: newIntentStatus,
-		ProviderReceipt: payload.ProviderRef,
+		ProviderReceipt: payload.ProviderReceipt,
 		FailureReason:   payload.FailureReason,
 		OccurredAt:      payload.OccurredAt,
 		Reason:          settledBy,
@@ -479,7 +491,7 @@ func (s *Service) HandleWebhook(ctx context.Context, providerName string, header
 		TransactionID:   tx.ID,
 		Provider:        tx.Provider,
 		ProviderRef:     tx.ProviderRef,
-		ProviderReceipt: payload.ProviderRef,
+		ProviderReceipt: payload.ProviderReceipt,
 		AmountMinor:     tx.AmountMinor,
 		Currency:        tx.Currency,
 		SettledBy:       settledBy,

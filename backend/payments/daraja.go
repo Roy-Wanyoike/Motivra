@@ -236,12 +236,16 @@ func (p *DarajaProvider) Initiate(ctx context.Context, req InitiateRequest) (Ini
 	}
 
 	now := p.nowFunc()
+	wholeKES, err := darajaWholeKES(req.Amount)
+	if err != nil {
+		return InitiateResult{}, err
+	}
 	payload := map[string]any{
 		"BusinessShortCode": p.cfg.Shortcode,
 		"Password":          darajaPassword(p.cfg.Shortcode, p.cfg.Passkey, now),
 		"Timestamp":         darajaTimestamp(now),
 		"TransactionType":   "CustomerPayBillOnline",
-		"Amount":            req.Amount.AmountMinor / 100, // Daraja takes whole KES
+		"Amount":            wholeKES, // Daraja takes whole KES only (cents refused above, never truncated)
 		"PartyA":            req.PayerPhone,
 		"PartyB":            p.cfg.Shortcode,
 		"PhoneNumber":       req.PayerPhone,
@@ -269,6 +273,19 @@ func (p *DarajaProvider) Initiate(ctx context.Context, req InitiateRequest) (Ini
 		Status:      TxPending,
 		ProviderRef: resp.CheckoutRequestID,
 	}, nil
+}
+
+// darajaWholeKES renders the amount Daraja accepts: M-Pesa STK push and
+// reversal carry whole KES only. Amounts with a cent remainder are
+// REFUSED, never truncated: rounding money at the adapter would settle a
+// different amount than the ledger attempted and the attested-amount
+// check would then strand the intent in PROCESSING forever (issue #62:
+// no rounding anywhere in this domain). Callers set integer-KES amounts.
+func darajaWholeKES(amount Money) (int64, error) {
+	if amount.AmountMinor%100 != 0 {
+		return 0, providerRejected("daraja: %s is not a whole-KES amount (M-Pesa carries no cents); use integer KES minor units divisible by 100", amount.String())
+	}
+	return amount.AmountMinor / 100, nil
 }
 
 // darajaAccountReference renders the intent linkage the STK push carries
@@ -370,12 +387,16 @@ func (p *DarajaProvider) Refund(ctx context.Context, req RefundRequest) (RefundR
 		return RefundResult{}, providerRejected("daraja: the original payment's provider_ref is required for reversal")
 	}
 
+	wholeKES, err := darajaWholeKES(req.Amount)
+	if err != nil {
+		return RefundResult{}, err
+	}
 	payload := map[string]any{
 		"Initiator":              p.cfg.Initiator,
 		"SecurityCredential":     p.cfg.SecurityCredential,
 		"CommandID":              "TransactionReversal",
 		"TransactionID":          req.ProviderRef,
-		"Amount":                 req.Amount.AmountMinor / 100,
+		"Amount":                 wholeKES, // Daraja takes whole KES only (cents refused above, never truncated)
 		"ReceiverParty":          p.cfg.Shortcode,
 		"RecieverIdentifierType": "11",
 		"ResultURL":              p.cfg.CallbackURL,
@@ -437,23 +458,35 @@ func (p *DarajaProvider) WebhookEvent(header http.Header, body []byte, now time.
 	}
 
 	amount := int64(0)
+	receipt := ""
 	if cb.CallbackMetadata != nil {
 		for _, item := range cb.CallbackMetadata.Item {
-			if item.Name == "Amount" {
+			switch item.Name {
+			case "Amount":
 				_ = json.Unmarshal(item.Value, &amount)
+			case "MpesaReceiptNumber":
+				// The provider's settlement identifier: stamped on the
+				// transaction with the outcome (provider_receipt).
+				_ = json.Unmarshal(item.Value, &receipt)
 			}
 			// PhoneNumber and other PII in the metadata are deliberately
 			// ignored: the ledger stores identifiers and provider
 			// references only (PII minimization, issue #62).
 		}
 	}
+	// The STK callback Amount is WHOLE KES — M-Pesa carries no cents (the
+	// same discipline darajaWholeKES enforces at initiation), so the
+	// callback echoes exactly the whole-KES amount that was pushed. The
+	// ledger is minor units: scale it back up, never truncate.
+	amountMinor := amount * 100
 
 	payload := WebhookPayload{
-		Provider:    p.Name(),
-		ProviderRef: cb.CheckoutRequestID,
-		AmountMinor: amount,
-		Currency:    CurrencyKES,
-		OccurredAt:  now,
+		Provider:        p.Name(),
+		ProviderRef:     cb.CheckoutRequestID,
+		ProviderReceipt: receipt,
+		AmountMinor:     amountMinor,
+		Currency:        CurrencyKES,
+		OccurredAt:      now,
 	}
 	switch {
 	case cb.ResultCode == 0:

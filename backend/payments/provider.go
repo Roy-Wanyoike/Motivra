@@ -10,6 +10,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// Adapter names — the stable identifiers stored on intents, transactions
+// and refunds (intent.provider), selected per intent at initiation.
+const (
+	// ProviderSandbox is the deterministic mock adapter (tests + local dev).
+	ProviderSandbox = "sandbox"
+	// ProviderDaraja is the M-Pesa Daraja adapter (owner credentials).
+	ProviderDaraja = "daraja"
+)
+
 // Provider is the settlement abstraction every payment adapter implements
 // (issue #62): initiate a collection, query its status (the reconciliation
 // fallback when a webhook is missed) and refund a settled payment.

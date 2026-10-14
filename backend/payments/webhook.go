@@ -53,13 +53,14 @@ const (
 // produces. The sandbox emits it directly; the Daraja adapter translates
 // the STK callback into it.
 type webhookEnvelope struct {
-	Event         string    `json:"event"`
-	Provider      string    `json:"provider"`
-	ProviderRef   string    `json:"provider_ref"`
-	AmountMinor   int64     `json:"amount_minor"`
-	Currency      string    `json:"currency"`
-	FailureReason string    `json:"failure_reason,omitempty"`
-	OccurredAt    time.Time `json:"occurred_at"`
+	Event           string    `json:"event"`
+	Provider        string    `json:"provider"`
+	ProviderRef     string    `json:"provider_ref"`
+	ProviderReceipt string    `json:"provider_receipt,omitempty"`
+	AmountMinor     int64     `json:"amount_minor"`
+	Currency        string    `json:"currency"`
+	FailureReason   string    `json:"failure_reason,omitempty"`
+	OccurredAt      time.Time `json:"occurred_at"`
 }
 
 // SignWebhookPayload renders the signature header value for body at the
@@ -168,13 +169,14 @@ func parseWebhookPayload(body []byte, provider string) (WebhookPayload, error) {
 	}
 
 	return WebhookPayload{
-		Event:         env.Event,
-		Provider:      env.Provider,
-		ProviderRef:   env.ProviderRef,
-		AmountMinor:   env.AmountMinor,
-		Currency:      env.Currency,
-		FailureReason: env.FailureReason,
-		OccurredAt:    env.OccurredAt,
+		Event:           env.Event,
+		Provider:        env.Provider,
+		ProviderRef:     env.ProviderRef,
+		ProviderReceipt: env.ProviderReceipt,
+		AmountMinor:     env.AmountMinor,
+		Currency:        env.Currency,
+		FailureReason:   env.FailureReason,
+		OccurredAt:      env.OccurredAt,
 	}, nil
 }
 
