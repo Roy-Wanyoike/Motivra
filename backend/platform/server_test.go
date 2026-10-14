@@ -37,6 +37,9 @@ func TestReadyzHealthyAndUnhealthy(t *testing.T) {
 	s.ServeHTTP(w, httptest.NewRequest("GET", "/readyz", nil))
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	require.Contains(t, w.Body.String(), "nats")
+	// Dependency error detail stays in the log: the unauthenticated body
+	// must not leak internals like hostnames or DSN fragments (#81).
+	require.NotContains(t, w.Body.String(), "connection refused")
 
 	s.checkers["nats"] = func(context.Context) error { return nil }
 	w = httptest.NewRecorder()

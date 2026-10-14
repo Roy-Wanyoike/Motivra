@@ -72,16 +72,53 @@ func (f *fakeStore) GetVehicle(_ context.Context, vehicleID uuid.UUID, scope Veh
 
 // scopeAllows mirrors the repository boundary in memory: tenant rows for
 // tenant principals, own personal rows for personal principals, everything
-// for the control plane (zero-value scope).
+// for the explicitly-unrestricted control plane, and NOTHING for the zero
+// value (fail closed, hardening issue #81).
 func scopeAllows(scope VehicleScope, v Vehicle) bool {
 	switch {
 	case scope.Unrestricted():
 		return true
 	case scope.TenantID != nil:
 		return v.TenantID != nil && *v.TenantID == *scope.TenantID
-	default:
+	case scope.OwnerID != nil:
 		return v.TenantID == nil && v.OwnerUserID == *scope.OwnerID
+	default:
+		return false
 	}
+}
+
+// TestZeroScopeFailsClosed proves the hardening invariant: a handler that
+// forgets to derive its scope from claims sees no rows at all, never a
+// cross-tenant dump. Only UnrestrictedScope() (the admin path) sees rows.
+func TestZeroScopeFailsClosed(t *testing.T) {
+	t.Parallel()
+	store := newFakeStore()
+	svc := NewService(store, &fakePublisher{})
+
+	v := &Vehicle{
+		OwnerUserID: uuid.New(),
+		VIN:         "1HGCM82633A004352",
+		Make:        "honda",
+		Model:       "accord",
+		Year:        2020,
+		Plate:       "KDA 001A",
+	}
+	require.NoError(t, svc.RegisterVehicle(context.Background(), v, v.OwnerUserID))
+
+	zero := VehicleScope{}
+	_, err := store.GetVehicle(context.Background(), v.ID, zero)
+	require.Error(t, err, "zero scope must not read rows")
+
+	got, err := store.GetVehicle(context.Background(), v.ID, UnrestrictedScope())
+	require.NoError(t, err, "explicit unrestricted scope still reads rows")
+	require.Equal(t, v.ID, got.ID)
+
+	list, _, err := store.ListVehicles(context.Background(), zero, nil, 10)
+	require.NoError(t, err)
+	require.Empty(t, list, "zero scope must list nothing")
+
+	require.False(t, zero.Unrestricted())
+	require.True(t, UnrestrictedScope().Unrestricted())
 }
 
 // vehicleKeyLess reports whether a's keyset position sorts before b's under
@@ -319,7 +356,7 @@ func TestRegisterVehicleNormalizesVINAndPublishesCreated(t *testing.T) {
 	assert.Equal(t, v.OwnerUserID.String(), payload["owner_user_id"])
 	assert.Equal(t, float64(1200), payload["mileage_latest_km"])
 
-	history, err := store.ListHistory(context.Background(), v.ID, VehicleScope{}, 10, 0)
+	history, err := store.ListHistory(context.Background(), v.ID, UnrestrictedScope(), 10, 0)
 	require.NoError(t, err)
 	require.Len(t, history, 1, "registration must seed exactly one history event")
 	assert.Equal(t, HistoryEventTypeNote, history[0].EventType)
@@ -491,7 +528,7 @@ func TestHistoryReturnsNewestFirst(t *testing.T) {
 		ids = append(ids, e.ID)
 	}
 
-	got, err := svc.History(context.Background(), v.ID, VehicleScope{}, 0, 0)
+	got, err := svc.History(context.Background(), v.ID, UnrestrictedScope(), 0, 0)
 	require.NoError(t, err)
 	require.Len(t, got, 4, "seeded note plus three recorded events")
 	assert.Equal(t, HistoryEventTypeNote, got[0].EventType, "the seeded note carries the registration timestamp")
@@ -507,7 +544,7 @@ func TestRecordMileageRejectsNegative(t *testing.T) {
 	t.Parallel()
 	svc := NewService(newFakeStore(), nil)
 
-	err := svc.RecordMileage(context.Background(), uuid.New(), -1, nil, VehicleScope{})
+	err := svc.RecordMileage(context.Background(), uuid.New(), -1, nil, UnrestrictedScope())
 	requireStatus(t, err, http.StatusUnprocessableEntity)
 }
 
@@ -518,10 +555,10 @@ func TestRecordMileageRejectsDecrease(t *testing.T) {
 	svc := NewService(store, pub)
 	v := registerTestVehicle(t, svc, 1000)
 
-	err := svc.RecordMileage(context.Background(), v.ID, 999, nil, VehicleScope{})
+	err := svc.RecordMileage(context.Background(), v.ID, 999, nil, UnrestrictedScope())
 	requireStatus(t, err, http.StatusConflict)
 
-	got, err := svc.GetVehicle(context.Background(), v.ID, VehicleScope{})
+	got, err := svc.GetVehicle(context.Background(), v.ID, UnrestrictedScope())
 	require.NoError(t, err)
 	assert.Equal(t, int64(1000), got.MileageLatestKm, "mileage must be unchanged after a rejected decrease")
 
@@ -538,7 +575,7 @@ func TestRecordMileagePublishesOldAndNewKm(t *testing.T) {
 	v := registerTestVehicle(t, svc, 1000)
 
 	recorder := uuid.New()
-	require.NoError(t, svc.RecordMileage(context.Background(), v.ID, 1500, &recorder, VehicleScope{}))
+	require.NoError(t, svc.RecordMileage(context.Background(), v.ID, 1500, &recorder, UnrestrictedScope()))
 
 	_, events := pub.published()
 	require.Len(t, events, 2)
@@ -551,11 +588,11 @@ func TestRecordMileagePublishesOldAndNewKm(t *testing.T) {
 	assert.Equal(t, float64(1000), payload["old_km"])
 	assert.Equal(t, float64(1500), payload["new_km"])
 
-	got, err := svc.GetVehicle(context.Background(), v.ID, VehicleScope{})
+	got, err := svc.GetVehicle(context.Background(), v.ID, UnrestrictedScope())
 	require.NoError(t, err)
 	assert.Equal(t, int64(1500), got.MileageLatestKm)
 
-	p, err := svc.Passport(context.Background(), v.ID, VehicleScope{})
+	p, err := svc.Passport(context.Background(), v.ID, UnrestrictedScope())
 	require.NoError(t, err)
 	assert.Equal(t, int64(1500), p.MileageLatestKm)
 	assert.Equal(t, int64(2), p.ServiceEventCount, "registration note plus mileage event")
@@ -566,7 +603,7 @@ func TestRecordMileageVehicleNotFound(t *testing.T) {
 	t.Parallel()
 	svc := NewService(newFakeStore(), nil)
 
-	err := svc.RecordMileage(context.Background(), uuid.New(), 100, nil, VehicleScope{})
+	err := svc.RecordMileage(context.Background(), uuid.New(), 100, nil, UnrestrictedScope())
 	requireStatus(t, err, http.StatusNotFound)
 }
 
@@ -582,7 +619,7 @@ func TestGetVehicleMapsMissingRowToNotFound(t *testing.T) {
 	store.vehicles = map[uuid.UUID]Vehicle{}
 	store.mu.Unlock()
 
-	_, err := svc.GetVehicle(context.Background(), v.ID, VehicleScope{})
+	_, err := svc.GetVehicle(context.Background(), v.ID, UnrestrictedScope())
 	require.Error(t, err)
 	requireStatus(t, err, http.StatusNotFound)
 	assert.Equal(t, "not_found", platform.AsError(err).Code)

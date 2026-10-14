@@ -56,13 +56,14 @@ type User struct {
 // never persisted. RevokedAt is non-nil once the session (or its token via
 // rotation) is no longer usable.
 type Session struct {
-	ID               uuid.UUID
-	UserID           uuid.UUID
-	RefreshTokenHash string
-	DeviceName       string
-	IPAddress        string
-	ExpiresAt        time.Time
-	RevokedAt        *time.Time
+	ID                uuid.UUID
+	UserID            uuid.UUID
+	RefreshTokenHash  string
+	DeviceName        string
+	IPAddress         string
+	ExpiresAt         time.Time
+	AbsoluteExpiresAt time.Time // rotation never extends this (issue #81)
+	RevokedAt         *time.Time
 }
 
 // RoleGrant is a role assignment, optionally scoped to a tenant. A nil

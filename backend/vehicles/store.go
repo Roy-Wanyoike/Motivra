@@ -41,32 +41,50 @@ const (
 //     are visible.
 //   - TenantID nil and OwnerID set: a personal principal; only vehicles
 //     registered outside any tenant and owned by the principal are visible.
-//   - Zero value (both nil): unrestricted — reserved for control-plane roles
-//     (ADMIN, SUPER_ADMIN) which read across tenants under the audit
-//     obligations of ADR-0004. It is never produced for CUSTOMER-style
-//     claims; the HTTP layer constructs scopes via scopeFromClaims.
+//   - Explicitly constructed via UnrestrictedScope(): control-plane roles
+//     (ADMIN, SUPER_ADMIN) read across tenants under the audit obligations
+//     of ADR-0004. It is never produced for CUSTOMER-style claims; the HTTP
+//     layer constructs scopes via scopeFromClaims.
+//   - Zero value: matches NOTHING (fail closed, hardening issue #81). A
+//     handler that forgets to derive its scope gets empty results rather
+//     than a cross-tenant leak — the same posture as the jobs domain.
 type VehicleScope struct {
-	TenantID *uuid.UUID
-	OwnerID  *uuid.UUID
+	TenantID             *uuid.UUID
+	OwnerID              *uuid.UUID
+	explicitUnrestricted bool
+}
+
+// UnrestrictedScope is the only way to obtain a scope that exempts queries
+// from tenant filtering. Restricting construction to an explicit call keeps
+// the zero value fail-closed.
+func UnrestrictedScope() VehicleScope {
+	return VehicleScope{explicitUnrestricted: true}
 }
 
 // Unrestricted reports whether the scope exempts the query from tenant
-// filtering (control-plane roles, ADR-0004).
-func (s VehicleScope) Unrestricted() bool { return s.TenantID == nil && s.OwnerID == nil }
+// filtering (control-plane roles, ADR-0004). Only scopes built by
+// UnrestrictedScope qualify; the zero value does not.
+func (s VehicleScope) Unrestricted() bool {
+	return s.explicitUnrestricted && s.TenantID == nil && s.OwnerID == nil
+}
 
 // vehicleScopePredicate renders the SQL condition constraining rows to
 // scope. tenantCol and ownerCol name the boundary columns of the queried
 // relation, qualified with a join alias when needed. nextParam is the
 // placeholder number the condition starts at; it consumes one parameter
-// ("" and nil when the scope is unrestricted).
+// ("" and nil when the scope is unrestricted). The zero value constrains
+// to no rows at all.
 func vehicleScopePredicate(scope VehicleScope, tenantCol, ownerCol string, nextParam int) (string, []any) {
 	switch {
 	case scope.Unrestricted():
 		return "", nil
 	case scope.TenantID != nil:
 		return fmt.Sprintf("%s = $%d", tenantCol, nextParam), []any{*scope.TenantID}
-	default:
+	case scope.OwnerID != nil:
 		return fmt.Sprintf("%s IS NULL AND %s = $%d", tenantCol, ownerCol, nextParam), []any{*scope.OwnerID}
+	default:
+		// Zero value (or malformed scope): fail closed.
+		return "1 = 0", nil
 	}
 }
 

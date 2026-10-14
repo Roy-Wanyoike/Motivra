@@ -219,6 +219,16 @@ func (f *fakeStore) expireSession(id uuid.UUID) {
 	f.sessions[id] = s
 }
 
+// ageAbsoluteSession forces a session's ABSOLUTE expiry into the past while
+// leaving the idle expiry valid — the 91st-day scenario of issue #81.
+func (f *fakeStore) ageAbsoluteSession(id uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.sessions[id]
+	s.AbsoluteExpiresAt = time.Now().Add(-time.Minute)
+	f.sessions[id] = s
+}
+
 // auditsByAction returns the recorded entries with the given action.
 func (f *fakeStore) auditsByAction(action string) []AuditEntry {
 	f.mu.Lock()

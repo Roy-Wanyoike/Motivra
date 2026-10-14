@@ -66,7 +66,12 @@ func main() {
 
 	store := identity.NewPostgresStore(pool)
 	issuer := identity.NewIssuer(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
-	svc := identity.NewService(store, issuer, publisher)
+	svc := identity.NewService(store, issuer, publisher, identity.WithTrustForwarded(cfg.TrustForwarded))
+	// Per-IP throttle on the public auth endpoints (0 disables; off in tests).
+	var authLimiter *platform.RateLimiter
+	if cfg.AuthRateLimitRPM > 0 {
+		authLimiter = platform.NewRateLimiter(cfg.AuthRateLimitRPM)
+	}
 
 	cleanups := []func(context.Context) error{
 		func(context.Context) error { pool.Close(); return nil },
@@ -74,17 +79,21 @@ func main() {
 	if publisher != nil {
 		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
 	}
-	cleanups = append(cleanups, stopMetrics, stopTracing)
+	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metricsHandler)
+	if err != nil {
+		logger.Error("metrics listener unavailable", "error", err, "addr", cfg.MetricsAddr)
+		os.Exit(1)
+	}
+	cleanups = append(cleanups, stopMetricsSrv, stopMetrics, stopTracing)
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
 	srv := platform.NewServer(cfg, logger,
-		platform.WithMount("/metrics", metricsHandler),
 		platform.WithChecker("database", func(ctx context.Context) error {
 			return pool.Ping(ctx)
 		}),
 		platform.WithMiddleware(platform.AuthMiddleware(validator)),
 	)
-	identity.Routes(srv.Router, svc)
+	identity.Routes(srv.Router, svc, authLimiter)
 
 	httpSrv := &http.Server{
 		Addr:              ":" + cfg.App.Port,

@@ -53,6 +53,9 @@ func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
 // NewServer builds the router with the Motivra middleware chain and
 // service options first, then mounts /healthz (liveness) and /readyz
 // (readiness) last so callers never fight route-registration ordering.
+// X-Forwarded-For is honoured only when cfg.TrustForwarded is set: without
+// a trusted proxy the header is client-controlled and spoofable (audit
+// IPs and rate-limit keys must be attacker-unchoosable).
 func NewServer(cfg Config, logger *slog.Logger, opts ...ServerOption) *Server {
 	s := &Server{
 		Router:   chi.NewRouter(),
@@ -61,7 +64,9 @@ func NewServer(cfg Config, logger *slog.Logger, opts ...ServerOption) *Server {
 		cfg:      cfg,
 	}
 	s.Router.Use(middleware.RequestID)
-	s.Router.Use(middleware.RealIP)
+	if cfg.TrustForwarded {
+		s.Router.Use(middleware.RealIP)
+	}
 	s.Router.Use(s.traceMiddleware)
 	s.Router.Use(s.requestLogger)
 	s.Router.Use(s.recoverer)
@@ -89,12 +94,24 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(failures) > 0 {
+		// Dependency error details go to the log only: /readyz is reachable
+		// without authentication, and pgx/NATS error strings can carry
+		// internal hostnames and DSN fragments (hardening issue #81).
+		details := make([]any, 0, len(failures)*2)
+		for name, msg := range failures {
+			details = append(details, name, msg)
+		}
+		s.logger.Error("readiness check failed", details...)
+		names := make([]string, 0, len(failures))
+		for name := range failures {
+			names = append(names, name)
+		}
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		body := map[string]any{
 			"code":   "not_ready",
 			"title":  "Service is not ready",
-			"failed": failures,
+			"failed": names,
 		}
 		_, _ = w.Write([]byte(LogJSON(body)))
 		return

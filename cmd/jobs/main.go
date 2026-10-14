@@ -69,7 +69,6 @@ func main() {
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
 	srv := platform.NewServer(cfg, logger,
-		platform.WithMount("/metrics", metricsHandler),
 		platform.WithChecker("database", func(ctx context.Context) error {
 			return pool.Ping(ctx)
 		}),
@@ -93,7 +92,12 @@ func main() {
 	if publisher != nil {
 		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
 	}
-	cleanups = append(cleanups, stopMetrics, stopTracing)
+	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metricsHandler)
+	if err != nil {
+		logger.Error("metrics listener unavailable", "error", err, "addr", cfg.MetricsAddr)
+		os.Exit(1)
+	}
+	cleanups = append(cleanups, stopMetricsSrv, stopMetrics, stopTracing)
 
 	if err := platform.Graceful(httpSrv, logger, cfg.ShutdownTimeout, cleanups...); err != nil {
 		logger.Error("shutdown completed with errors", "error", err)

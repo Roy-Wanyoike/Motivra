@@ -38,24 +38,26 @@ type AccessResponse struct {
 // implementation of the issuer-agnostic token abstraction (ADR-0004):
 // swapping to an external OIDC provider later changes this type only.
 type Issuer struct {
-	secret     []byte
-	issuer     string
-	audience   string
-	accessTTL  time.Duration
-	refreshTTL time.Duration
+	secret      []byte
+	issuer      string
+	audience    string
+	accessTTL   time.Duration
+	refreshTTL  time.Duration
+	absoluteTTL time.Duration
 }
 
 // NewIssuer builds an Issuer for the given shared HS256 secret, token issuer
-// and audience, using the default 15-minute access TTL and 30-day refresh
-// TTL. The secret must be distributed out-of-band to every validating
-// service.
+// and audience, using the default 15-minute access TTL, 30-day refresh TTL
+// and 90-day absolute session cap. The secret must be distributed
+// out-of-band to every validating service.
 func NewIssuer(secret, issuer, audience string) *Issuer {
 	return &Issuer{
-		secret:     []byte(secret),
-		issuer:     issuer,
-		audience:   audience,
-		accessTTL:  DefaultAccessTTL,
-		refreshTTL: DefaultRefreshTTL,
+		secret:      []byte(secret),
+		issuer:      issuer,
+		audience:    audience,
+		accessTTL:   DefaultAccessTTL,
+		refreshTTL:  DefaultRefreshTTL,
+		absoluteTTL: platform.DefaultAbsoluteSessionTTL,
 	}
 }
 
@@ -66,7 +68,7 @@ func NewIssuer(secret, issuer, audience string) *Issuer {
 // highest-priority role), roles (all roles), sid (session id), iss, aud,
 // iat and exp.
 func (i *Issuer) Issue(ctx context.Context, store SessionStore, user User, deviceName, ip string) (AccessResponse, error) {
-	return i.issue(ctx, store, user, deviceName, ip)
+	return i.issue(ctx, store, user, deviceName, ip, time.Time{})
 }
 
 // Refresh validates an opaque refresh token, rotates its session (revoking
@@ -91,6 +93,12 @@ func (i *Issuer) Refresh(ctx context.Context, store SessionStore, refreshToken s
 	if !time.Now().Before(sess.ExpiresAt) {
 		return AccessResponse{}, Session{}, platform.ErrUnauthorized("refresh token is invalid")
 	}
+	// Absolute cap: rotation extends the idle expiry but never this bound,
+	// so every session ends at most absoluteTTL after its first login
+	// (hardening issue #81).
+	if !time.Now().Before(sess.AbsoluteExpiresAt) {
+		return AccessResponse{}, Session{}, platform.ErrUnauthorized("refresh token is invalid")
+	}
 	user, err := store.GetUser(ctx, sess.UserID)
 	if err != nil {
 		if isNotFound(err) {
@@ -106,7 +114,7 @@ func (i *Issuer) Refresh(ctx context.Context, store SessionStore, refreshToken s
 	if err := store.RevokeSession(ctx, sess.ID); err != nil {
 		return AccessResponse{}, Session{}, fmt.Errorf("revoke rotated session: %w", err)
 	}
-	resp, err := i.issue(ctx, store, user, sess.DeviceName, sess.IPAddress)
+	resp, err := i.issue(ctx, store, user, sess.DeviceName, sess.IPAddress, sess.AbsoluteExpiresAt)
 	if err != nil {
 		return AccessResponse{}, Session{}, err
 	}
@@ -122,8 +130,10 @@ func (i *Issuer) Revoke(ctx context.Context, store SessionStore, sessionID uuid.
 	return nil
 }
 
-// issue is the shared session-creation and signing path for Issue and Refresh.
-func (i *Issuer) issue(ctx context.Context, store SessionStore, user User, deviceName, ip string) (AccessResponse, error) {
+// issue is the shared session-creation and signing path for Issue and
+// Refresh. absolute is the non-extendable session bound: zero for fresh
+// logins (now+absoluteTTL), the predecessor's value across rotations.
+func (i *Issuer) issue(ctx context.Context, store SessionStore, user User, deviceName, ip string, absolute time.Time) (AccessResponse, error) {
 	tenantID, roles, err := i.claimContext(ctx, store, user)
 	if err != nil {
 		return AccessResponse{}, err
@@ -135,13 +145,17 @@ func (i *Issuer) issue(ctx context.Context, store SessionStore, user User, devic
 		return AccessResponse{}, err
 	}
 	now := time.Now()
+	if absolute.IsZero() {
+		absolute = now.Add(i.absoluteTTL)
+	}
 	sess := Session{
-		ID:               sessionID,
-		UserID:           user.ID,
-		RefreshTokenHash: i.RefreshTokenHash(refreshToken),
-		DeviceName:       deviceName,
-		IPAddress:        ip,
-		ExpiresAt:        now.Add(i.refreshTTL),
+		ID:                sessionID,
+		UserID:            user.ID,
+		RefreshTokenHash:  i.RefreshTokenHash(refreshToken),
+		DeviceName:        deviceName,
+		IPAddress:         ip,
+		ExpiresAt:         now.Add(i.refreshTTL),
+		AbsoluteExpiresAt: absolute,
 	}
 	if err := store.CreateSession(ctx, sess); err != nil {
 		return AccessResponse{}, fmt.Errorf("create session: %w", err)

@@ -45,8 +45,19 @@ func TestValidate(t *testing.T) {
 		{"bad port", func(c *Config) { c.App.Port = "99999" }, "MOTIVRA_PORT"},
 		{"unknown env", func(c *Config) { c.App.Env = "stagingx" }, "MOTIVRA_ENV"},
 		{"short secret in production", func(c *Config) { c.App.Env = EnvProduction; c.JWT.Secret = "short" }, "MOTIVRA_JWT_SECRET"},
+		{"short secret in staging", func(c *Config) { c.App.Env = EnvStaging; c.JWT.Secret = "" }, "MOTIVRA_JWT_SECRET"},
+		{"legacy dev placeholder in production", func(c *Config) {
+			c.App.Env = EnvProduction
+			c.JWT.Secret = legacyDevJWTSecret
+		}, "historical development placeholder"},
+		{"legacy dev placeholder in development", func(c *Config) {
+			c.App.Env = EnvDevelopment
+			c.JWT.Secret = legacyDevJWTSecret
+			c.Database.URL = "postgres://localhost/motivra"
+		}, "historical development placeholder"},
 		{"otel enabled without endpoint", func(c *Config) { c.OTel = OTelConfig{Enabled: true} }, "OTEL_EXPORTER_OTLP_ENDPOINT"},
 		{"bad shutdown timeout", func(c *Config) { c.ShutdownTimeout = -1 }, "MOTIVRA_SHUTDOWN_TIMEOUT"},
+		{"negative rate limit", func(c *Config) { c.AuthRateLimitRPM = -5 }, "MOTIVRA_AUTH_RATE_LIMIT_RPM"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,5 +83,22 @@ func TestProductionSecretLengthAccepted(t *testing.T) {
 	cfg.Database.URL = "postgres://localhost/motivra"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("production config with 44-byte secret should validate, got %v", err)
+	}
+}
+
+// TestOTelDefaultsOnInProduction pins the ADR-0005 posture: a production
+// deployment must not silently run without telemetry. Load() defaults the
+// exporter on in production and off elsewhere unless the env var says so.
+func TestOTelDefaultsOnInProduction(t *testing.T) {
+	t.Setenv("MOTIVRA_ENV", "production")
+	t.Setenv("MOTIVRA_OTEL_ENABLED", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "collector:4317")
+	if cfg := Load(); !cfg.OTel.Enabled {
+		t.Fatal("OTel must default to enabled in production")
+	}
+
+	t.Setenv("MOTIVRA_ENV", "development")
+	if cfg := Load(); cfg.OTel.Enabled {
+		t.Fatal("OTel must default to disabled outside production")
 	}
 }

@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strings"
-
-	"github.com/go-chi/chi/v5"
 )
 
 // AuthMiddleware validates Bearer access tokens and stores the resulting
@@ -61,15 +59,17 @@ func RequireRole(roles []string, h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// TenantScopeFrom returns the tenant identifier for the request: the
-// authenticated claims first, otherwise the {tenantID} URL placeholder.
-// Domain repositories MUST scope queries with it on multi-tenant tables
-// (ADR-0004).
-func TenantScopeFrom(r *http.Request) string {
+// TenantScopeFrom returns the tenant identifier for the request. It comes
+// exclusively from the authenticated claims — never from client input
+// (URL parameters, query strings or bodies), which would make tenant
+// boundaries attacker-choosable. The second return is false for
+// unauthenticated requests or claims without a tenant; callers must treat
+// that as "no tenant access", not "unrestricted access" (ADR-0004).
+func TenantScopeFrom(r *http.Request) (string, bool) {
 	if claims, ok := ClaimsFromContext(r.Context()); ok && claims.TenantID != "" {
-		return claims.TenantID
+		return claims.TenantID, true
 	}
-	return chi.URLParam(r, "tenantID")
+	return "", false
 }
 
 // bearerToken extracts the Bearer credential from the Authorization header.

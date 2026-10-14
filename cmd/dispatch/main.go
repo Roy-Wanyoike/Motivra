@@ -38,11 +38,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	cleanups := []func(context.Context) error{stopMetrics, stopTracing}
+	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metricsHandler)
+	if err != nil {
+		logger.Error("metrics listener unavailable", "error", err, "addr", cfg.MetricsAddr)
+		os.Exit(1)
+	}
+	cleanups := []func(context.Context) error{stopMetricsSrv, stopMetrics, stopTracing}
 
 	validator := platform.NewJWTValidator(cfg.JWT.Secret, cfg.JWT.Issuer, cfg.JWT.Audience)
 	srv := platform.NewServer(cfg, logger,
-		platform.WithMount("/metrics", metricsHandler),
 		platform.WithChecker("engine", func(context.Context) error { return nil }),
 		platform.WithMiddleware(platform.AuthMiddleware(validator)),
 	)

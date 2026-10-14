@@ -196,3 +196,50 @@ func TestHighestRolePrecedence(t *testing.T) {
 	require.Empty(t, HighestRole(nil))
 	require.Empty(t, HighestRole([]Role{Role("UNKNOWN")}))
 }
+
+// TestRefreshRejectsAbsolutelyExpiredSession pins the hardening rule: a
+// session whose absolute lifetime is over is dead even with idle time left
+// (rotation can extend the idle cap but never the absolute one).
+func TestRefreshRejectsAbsolutelyExpiredSession(t *testing.T) {
+	store := newFakeStore()
+	issuer := newTestIssuer()
+	user := testUser(RoleCustomer)
+	require.NoError(t, store.CreateUser(t.Context(), &user))
+
+	resp, err := issuer.Issue(t.Context(), store, user, "", "")
+	require.NoError(t, err)
+	hash := issuer.RefreshTokenHash(resp.RefreshToken)
+	sess, err := store.GetSessionByRefreshHash(t.Context(), hash)
+	require.NoError(t, err)
+	store.ageAbsoluteSession(sess.ID)
+
+	_, _, err = issuer.Refresh(t.Context(), store, resp.RefreshToken)
+	requireUnauthorized(t, err)
+}
+
+// TestRotationCarriesAbsoluteExpiry proves the successor session inherits
+// the predecessor's absolute bound instead of getting a fresh one, so
+// endless rotation cannot keep a session alive forever.
+func TestRotationCarriesAbsoluteExpiry(t *testing.T) {
+	store := newFakeStore()
+	issuer := newTestIssuer()
+	user := testUser(RoleCustomer)
+	require.NoError(t, store.CreateUser(t.Context(), &user))
+
+	first, err := issuer.Issue(t.Context(), store, user, "", "")
+	require.NoError(t, err)
+	originalHash := issuer.RefreshTokenHash(first.RefreshToken)
+	original, err := store.GetSessionByRefreshHash(t.Context(), originalHash)
+	require.NoError(t, err)
+
+	second, _, err := issuer.Refresh(t.Context(), store, first.RefreshToken)
+	require.NoError(t, err)
+	require.NotEqual(t, first.RefreshToken, second.RefreshToken, "rotation mints a new token")
+
+	newHash := issuer.RefreshTokenHash(second.RefreshToken)
+	successor, err := store.GetSessionByRefreshHash(t.Context(), newHash)
+	require.NoError(t, err)
+	require.False(t, successor.AbsoluteExpiresAt.IsZero())
+	require.True(t, successor.AbsoluteExpiresAt.Equal(original.AbsoluteExpiresAt),
+		"rotation must carry the original absolute bound forward, not extend it")
+}
