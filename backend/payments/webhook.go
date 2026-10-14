@@ -77,10 +77,10 @@ func SignWebhookPayload(secret, body []byte, at time.Time) string {
 // window) and the HMAC must match in constant time.
 func verifyWebhookSignature(secret, body []byte, header string, now time.Time) error {
 	if len(secret) == 0 {
-		return fmt.Errorf("payments: webhook signature verification is not configured")
+		return errWebhookUnauthorized("webhook signature verification is not configured")
 	}
 	if header == "" {
-		return fmt.Errorf("payments: webhook signature header %s is missing", WebhookSignatureHeader)
+		return errWebhookUnauthorized("webhook signature header %s is missing", WebhookSignatureHeader)
 	}
 	var tsPart, sigPart string
 	for _, part := range strings.Split(header, ",") {
@@ -93,15 +93,15 @@ func verifyWebhookSignature(secret, body []byte, header string, now time.Time) e
 		}
 	}
 	if tsPart == "" || sigPart == "" {
-		return fmt.Errorf("payments: webhook signature is malformed (want t=<unix>,v1=<hex>)")
+		return errWebhookUnauthorized("webhook signature is malformed (want t=<unix>,v1=<hex>)")
 	}
 	ts, err := strconv.ParseInt(tsPart, 10, 64)
 	if err != nil {
-		return fmt.Errorf("payments: webhook signature timestamp is not a unix number")
+		return errWebhookUnauthorized("webhook signature timestamp is not a unix number")
 	}
 	skew := now.Sub(time.Unix(ts, 0))
 	if skew < -signatureFreshness || skew > signatureFreshness {
-		return fmt.Errorf("payments: webhook signature timestamp is outside the %s freshness window", signatureFreshness)
+		return errWebhookUnauthorized("webhook signature timestamp is outside the %s freshness window", signatureFreshness)
 	}
 	mac := hmac.New(sha256.New, secret)
 	fmt.Fprintf(mac, "%d.", ts)
@@ -109,10 +109,10 @@ func verifyWebhookSignature(secret, body []byte, header string, now time.Time) e
 	want := mac.Sum(nil)
 	got, err := hex.DecodeString(sigPart)
 	if err != nil {
-		return fmt.Errorf("payments: webhook signature is not valid hex")
+		return errWebhookUnauthorized("webhook signature is not valid hex")
 	}
 	if !hmac.Equal(want, got) {
-		return fmt.Errorf("payments: webhook signature does not match the payload")
+		return errWebhookUnauthorized("webhook signature does not match the payload")
 	}
 	return nil
 }

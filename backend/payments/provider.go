@@ -37,12 +37,13 @@ type Provider interface {
 	// Refund requests a (full) refund of a settled payment.
 	Refund(ctx context.Context, req RefundRequest) (RefundResult, error)
 
-	// WebhookEvent verifies the webhook request's authenticity (the trust
+	// WebhookEvent verifies the webhook's authenticity (the trust
 	// boundary — signature or shared-secret verification is mandatory and
 	// fail-closed) and normalizes its body into a WebhookPayload. An
 	// unverified, malformed or foreign payload is an error, never a
-	// partially-decoded structure.
-	WebhookEvent(r *http.Request, body []byte, now time.Time) (WebhookPayload, error)
+	// partially-decoded structure. Signature failures wrap
+	// ErrWebhookUnauthorized; content rejections wrap ErrWebhookRejected.
+	WebhookEvent(header http.Header, body []byte, now time.Time) (WebhookPayload, error)
 }
 
 // InitiateRequest is the normalized initiate call.

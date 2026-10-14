@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -120,42 +121,33 @@ func TestWebhookSignatureTrustBoundary(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("valid signature is accepted", func(t *testing.T) {
-		r := httptest.NewRequest("POST", "/v1/payments/webhooks/sandbox", bytes.NewReader(body))
-		r.Header.Set(WebhookSignatureHeader, signForTest(t, testWebhookSecret, body, now))
-		payload, err := p.WebhookEvent(r, body, now)
+		payload, err := p.WebhookEvent(signedHeader(t, testWebhookSecret, body, now), body, now)
 		require.NoError(t, err)
 		assert.Equal(t, WebhookEventTransactionSucceeded, payload.Event)
 		assert.Equal(t, int64(15_000), payload.AmountMinor)
 	})
 
 	t.Run("missing signature refused", func(t *testing.T) {
-		r := httptest.NewRequest("POST", "/x", bytes.NewReader(body))
-		_, err := p.WebhookEvent(r, body, now)
+		_, err := p.WebhookEvent(http.Header{}, body, now)
 		require.Error(t, err)
 	})
 
 	t.Run("tampered body refused", func(t *testing.T) {
 		tampered := bytes.Replace(body, []byte("15000"), []byte("99999"), 1)
-		r := httptest.NewRequest("POST", "/x", bytes.NewReader(tampered))
-		r.Header.Set(WebhookSignatureHeader, signForTest(t, testWebhookSecret, body, now))
-		_, err := p.WebhookEvent(r, tampered, now)
+		_, err := p.WebhookEvent(signedHeader(t, testWebhookSecret, body, now), tampered, now)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "does not match")
+		assert.ErrorIs(t, err, ErrWebhookUnauthorized)
 	})
 
 	t.Run("stale signature refused (replay window)", func(t *testing.T) {
 		stale := now.Add(-2 * signatureFreshness)
-		r := httptest.NewRequest("POST", "/x", bytes.NewReader(body))
-		r.Header.Set(WebhookSignatureHeader, signForTest(t, testWebhookSecret, body, stale))
-		_, err := p.WebhookEvent(r, body, now)
+		_, err := p.WebhookEvent(signedHeader(t, testWebhookSecret, body, stale), body, now)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "freshness")
+		assert.ErrorIs(t, err, ErrWebhookUnauthorized)
 	})
 
 	t.Run("wrong secret refused", func(t *testing.T) {
-		r := httptest.NewRequest("POST", "/x", bytes.NewReader(body))
-		r.Header.Set(WebhookSignatureHeader, signForTest(t, "another-secret", body, now))
-		_, err := p.WebhookEvent(r, body, now)
+		_, err := p.WebhookEvent(signedHeader(t, "another-secret", body, now), body, now)
 		require.Error(t, err)
 	})
 }
@@ -234,9 +226,7 @@ func TestDarajaWebhookNormalization(t *testing.T) {
 		`CheckoutRequestID":"ws_CO_191220191020363925","ResultCode":0,"ResultDesc":"The service request is processed successfully.",` +
 		`"CallbackMetadata":{"Item":[{"Name":"Amount","Value":1500},{"Name":"MpesaReceiptNumber","Value":"NLJ7RT61SV"},` +
 		`{"Name":"TransactionDate","Value":"20191219102115"},{"Name":"PhoneNumber","Value":254708374149}]}}}}`)
-	r := httptest.NewRequest("POST", "/v1/payments/webhooks/daraja", bytes.NewReader(success))
-	r.Header.Set(WebhookSignatureHeader, signForTest(t, "daraja-webhook-secret", success, now))
-	payload, err := p.WebhookEvent(r, success, now)
+	payload, err := p.WebhookEvent(signedHeader(t, "daraja-webhook-secret", success, now), success, now)
 	require.NoError(t, err)
 	assert.Equal(t, WebhookEventTransactionSucceeded, payload.Event)
 	assert.Equal(t, "ws_CO_191220191020363925", payload.ProviderRef)
@@ -248,25 +238,21 @@ func TestDarajaWebhookNormalization(t *testing.T) {
 
 	failure := []byte(`{"Body":{"stkCallback":{"MerchantRequestID":"29115-34620561-1",` +
 		`"CheckoutRequestID":"ws_CO_191220191020363926","ResultCode":1032,"ResultDesc":"Request cancelled by user"}}}`)
-	r = httptest.NewRequest("POST", "/v1/payments/webhooks/daraja", bytes.NewReader(failure))
-	r.Header.Set(WebhookSignatureHeader, signForTest(t, "daraja-webhook-secret", failure, now))
-	payload, err = p.WebhookEvent(r, failure, now)
+	payload, err = p.WebhookEvent(signedHeader(t, "daraja-webhook-secret", failure, now), failure, now)
 	require.NoError(t, err)
 	assert.Equal(t, WebhookEventTransactionFailed, payload.Event)
 	assert.Equal(t, "Request cancelled by user", payload.FailureReason)
 
 	t.Run("unsigned daraja callback refused (fail-closed)", func(t *testing.T) {
-		r := httptest.NewRequest("POST", "/x", bytes.NewReader(success))
-		_, err := p.WebhookEvent(r, success, now)
+		_, err := p.WebhookEvent(http.Header{}, success, now)
 		require.Error(t, err)
 	})
 
 	t.Run("unconfigured secret disables daraja webhooks entirely", func(t *testing.T) {
 		open := NewDarajaProvider(DarajaConfig{})
-		r := httptest.NewRequest("POST", "/x", bytes.NewReader(success))
-		_, err := open.WebhookEvent(r, success, now)
+		_, err := open.WebhookEvent(http.Header{}, success, now)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not configured")
+		assert.ErrorIs(t, err, ErrWebhookUnauthorized)
 	})
 }
 
@@ -328,6 +314,14 @@ func TestDarajaAccountReferenceIsBounded(t *testing.T) {
 	ref := darajaAccountReference(id)
 	assert.Len(t, ref, 11)
 	assert.True(t, strings.HasPrefix(ref, "MVR"))
+}
+
+// signedHeader builds an http.Header carrying the signature for body.
+func signedHeader(t *testing.T, secret string, body []byte, at time.Time) http.Header {
+	t.Helper()
+	h := http.Header{}
+	h.Set(WebhookSignatureHeader, SignWebhookPayload([]byte(secret), body, at))
+	return h
 }
 
 // mustUUID parses a fixed uuid or fails the test.

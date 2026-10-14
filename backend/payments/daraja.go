@@ -423,8 +423,8 @@ type darajaWebhookEnvelope struct {
 // HMAC (Daraja signs nothing itself — see README's webhook setup). With
 // MOTIVRA_PAYMENTS_DARAJA_WEBHOOK_SECRET unset, daraja webhooks are
 // DISABLED (fail-closed), not unsigned.
-func (p *DarajaProvider) WebhookEvent(r *http.Request, body []byte, now time.Time) (WebhookPayload, error) {
-	if err := verifyWebhookSignature(p.cfg.WebhookSecret, body, r.Header.Get(WebhookSignatureHeader), now); err != nil {
+func (p *DarajaProvider) WebhookEvent(header http.Header, body []byte, now time.Time) (WebhookPayload, error) {
+	if err := verifyWebhookSignature(p.cfg.WebhookSecret, body, header.Get(WebhookSignatureHeader), now); err != nil {
 		return WebhookPayload{}, err
 	}
 	var env darajaWebhookEnvelope

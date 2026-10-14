@@ -152,8 +152,8 @@ func (p *SandboxProvider) Refund(_ context.Context, req RefundRequest) (RefundRe
 // WebhookEvent implements Provider: HMAC verification (the trust boundary)
 // precedes any parsing; the body must be the normalized envelope naming
 // the sandbox provider.
-func (p *SandboxProvider) WebhookEvent(r *http.Request, body []byte, now time.Time) (WebhookPayload, error) {
-	if err := verifyWebhookSignature(p.WebhookSecret, body, r.Header.Get(WebhookSignatureHeader), now); err != nil {
+func (p *SandboxProvider) WebhookEvent(header http.Header, body []byte, now time.Time) (WebhookPayload, error) {
+	if err := verifyWebhookSignature(p.WebhookSecret, body, header.Get(WebhookSignatureHeader), now); err != nil {
 		return WebhookPayload{}, err
 	}
 	return parseWebhookPayload(body, p.Name())
