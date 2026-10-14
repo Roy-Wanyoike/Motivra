@@ -218,3 +218,100 @@ func seedRequestAndJob(t *testing.T, svc *Service, customerID uuid.UUID) Job {
 	require.NoError(t, err)
 	return job
 }
+
+// TestJobTenantIsolationIntegration proves at the SQL level what issue #88's
+// tenancy AC mandates: the tenant_id columns of jobs migration 000006 exist
+// and are stamped (request -> job inheritance; assignments and transitions
+// denormalize the parent job's tenant inside the writing transaction), and
+// every read scope derives its isolation from tenant_id — a tenant never
+// sees another tenant's rows, NULL-tenant rows keep the resource-level
+// scope (the documented backfill posture: no principal->tenant mapping was
+// derivable when the columns landed), and the zero scope fails closed.
+func TestJobTenantIsolationIntegration(t *testing.T) {
+	svc, store := integrationStore(t)
+	ctx := t.Context()
+
+	tenantA, tenantB := uuid.New(), uuid.New()
+	customerA, customerB := uuid.New(), uuid.New()
+	jobA := seedRequestAndJobForTenant(t, svc, customerA, &tenantA)
+	jobB := seedRequestAndJobForTenant(t, svc, customerB, &tenantB)
+
+	// The tenancy columns are stamped at creation.
+	require.NotNil(t, jobA.TenantID)
+	require.Equal(t, tenantA, *jobA.TenantID)
+	require.NotNil(t, jobB.TenantID)
+	require.Equal(t, tenantB, *jobB.TenantID)
+
+	// Tenant-scoped reads: tenant A sees its job, never tenant B's.
+	got, err := store.GetJob(ctx, jobA.ID, tenantScope(tenantA))
+	require.NoError(t, err)
+	require.Equal(t, jobA.ID, got.ID)
+	_, err = store.GetJob(ctx, jobA.ID, tenantScope(tenantB))
+	require.True(t, errors.Is(err, ErrJobNotFound), "cross-tenant get must be not-found, got %v", err)
+
+	pageA, err := store.ListJobsByStatus(ctx, StatusCreated, 50, 0, tenantScope(tenantA))
+	require.NoError(t, err)
+	require.Len(t, pageA, 1, "a tenant page contains only that tenant's rows")
+	require.Equal(t, jobA.ID, pageA[0].ID)
+
+	// Transitions and assignments denormalize the parent job's tenant and
+	// are tenant-filtered on their own columns.
+	actor := uuid.New()
+	require.NoError(t, svc.Transition(ctx, jobA.ID, StatusTriaging, &actor, "intake triage", opScope()))
+	require.NoError(t, svc.AssignTechnician(ctx, jobA.ID, uuid.New(), &actor, opScope()))
+
+	var assignTenant *uuid.UUID
+	require.NoError(t, store.pool.QueryRow(ctx,
+		`SELECT tenant_id FROM job_assignments WHERE job_id = $1 LIMIT 1`, jobA.ID).Scan(&assignTenant))
+	require.NotNil(t, assignTenant, "job_assignments carries the denormalized tenant_id")
+	require.Equal(t, tenantA, *assignTenant)
+
+	var transitionTenant *uuid.UUID
+	require.NoError(t, store.pool.QueryRow(ctx,
+		`SELECT tenant_id FROM job_transitions WHERE job_id = $1 LIMIT 1`, jobA.ID).Scan(&transitionTenant))
+	require.NotNil(t, transitionTenant, "job_transitions carries the denormalized tenant_id")
+	require.Equal(t, tenantA, *transitionTenant)
+
+	trailA, err := store.ListTransitions(ctx, jobA.ID, tenantScope(tenantA))
+	require.NoError(t, err)
+	require.Len(t, trailA, 2, "the tenant reads its own trail (transition + assignment)")
+	trailB, err := store.ListTransitions(ctx, jobA.ID, tenantScope(tenantB))
+	require.NoError(t, err)
+	assert.Empty(t, trailB, "another tenant reads an empty trail")
+
+	// A NULL-tenant row (the pre-migration backfill posture) is invisible to
+	// tenant scopes but keeps the resource-level scope for its customer.
+	personal := seedRequestAndJobForTenant(t, svc, uuid.New(), nil)
+	_, err = store.GetJob(ctx, personal.ID, tenantScope(tenantA))
+	require.True(t, errors.Is(err, ErrJobNotFound), "tenant scopes never see NULL-tenant rows, got %v", err)
+	_, err = store.GetJob(ctx, personal.ID, viewScope(personal.CustomerID))
+	require.NoError(t, err, "personal rows keep the documented resource-level scope")
+
+	// The zero scope still fails closed at the SQL level.
+	_, err = store.GetJob(ctx, jobA.ID, ReadScope{})
+	require.True(t, errors.Is(err, ErrJobNotFound), "zero scope must match nothing, got %v", err)
+	empty, err := store.ListJobsByStatus(ctx, StatusCreated, 50, 0, ReadScope{})
+	require.NoError(t, err)
+	assert.Empty(t, empty, "zero scope must return an empty page")
+
+	pgtest.Truncate(t, store.pool, jobsTables...)
+}
+
+// seedRequestAndJobForTenant runs one customer (with the given tenant, which
+// may be nil for a personal principal) through request -> CREATED job using
+// the real service against the real store.
+func seedRequestAndJobForTenant(t *testing.T, svc *Service, customerID uuid.UUID, tenantID *uuid.UUID) Job {
+	t.Helper()
+	req := &ServiceRequest{
+		TenantID:    tenantID,
+		CustomerID:  customerID,
+		Description: "Engine warning light, rough idle",
+		LocationLat: floatOf(-1.303202),
+		LocationLng: floatOf(36.791611),
+		AddressText: "Karen Rd, Nairobi",
+	}
+	require.NoError(t, svc.CreateRequest(t.Context(), req))
+	job, err := svc.CreateJobFromRequest(t.Context(), req.ID, opScope())
+	require.NoError(t, err)
+	return job
+}

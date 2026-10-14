@@ -16,7 +16,9 @@ import (
 // contract of deferral 2 (issue #28): the acting principal lands on the
 // envelope — not only inside the payload — and the platform server's
 // request id becomes the correlation_id (ADR-0002: propagated from the
-// originating request).
+// originating request). The envelope tenant mirrors the job's tenancy
+// column (jobs migration 000006, issue #88): empty for personal
+// principals' jobs, the tenant UUID once a tenant claim stamped the row.
 func TestEventEnvelopeCarriesActorAndCorrelation(t *testing.T) {
 	svc, store, pub := newFixture()
 	ctx := context.WithValue(context.Background(), middleware.RequestIDKey, "req-jobs-1")
@@ -34,7 +36,7 @@ func TestEventEnvelopeCarriesActorAndCorrelation(t *testing.T) {
 	assert.Equal(t, actor.String(), e.ActorID, "envelope actor mirrors the transition actor")
 	assert.Equal(t, "req-jobs-1", e.CorrelationID, "request id becomes the correlation id")
 	assert.Equal(t, job.ID.String(), e.AggregateID)
-	assert.Empty(t, e.TenantID, "jobs tables carry no tenant_id yet (documented follow-up in #28)")
+	assert.Empty(t, e.TenantID, "a personal principal's job (no tenant claim) publishes an empty envelope tenant")
 	assert.Empty(t, e.CausationID, "request-initiated events are initiators: causation stays null (ADR-0002)")
 	assert.NotEmpty(t, e.EventID)
 	assert.Equal(t, platform.SchemaVersion, e.SchemaVersion)
@@ -46,4 +48,21 @@ func TestEventEnvelopeCarriesActorAndCorrelation(t *testing.T) {
 	require.Len(t, events, 2)
 	assert.Empty(t, events[1].ActorID, "nil actor records a system actor as empty")
 	assert.Equal(t, "req-jobs-1", events[1].CorrelationID)
+
+	// A tenant-stamped job carries its tenant on the envelope (migration
+	// 000006: the tenancy columns are now source of truth for the field).
+	tenant := uuid.New()
+	req := &ServiceRequest{
+		CustomerID:  uuid.New(),
+		TenantID:    &tenant,
+		Description: "Tenant-stamped intake",
+	}
+	require.NoError(t, svc.CreateRequest(ctx, req))
+	tenantJob, err := svc.CreateJobFromRequest(ctx, req.ID, opScope())
+	require.NoError(t, err)
+	require.NotNil(t, tenantJob.TenantID, "the job inherits the originating request's tenant")
+	require.NoError(t, svc.Transition(ctx, tenantJob.ID, StatusTriaging, nil, "", opScope()))
+	events = pub.ofType(t, EventJobStatusChanged)
+	require.Len(t, events, 3)
+	assert.Equal(t, tenant.String(), events[2].TenantID, "the envelope tenant mirrors the job's tenant_id")
 }

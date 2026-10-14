@@ -81,3 +81,27 @@ The security model must therefore be fixed early enough that Wave 1 identity wor
 - Two-layer enforcement (middleware + service) is redundant by design; it costs code and tests, and skipping the service-layer check is a recurring review target.
 - Repository-level tenant scoping forbids the convenient "just query it" path for support tooling; support capabilities must be built as audited, permissioned flows instead.
 - MFA and OIDC federation are deferred — an accepted, explicit gap requiring a follow-up ADR before Wave 7 partner access, tracked on the roadmap.
+
+## Conformance
+
+Maintained from issue #88 onward: every ADR-0004 decision row is mapped to
+its implementation and the artifact that proves it, so security review and
+the PR checklist verify the same table instead of prose claims. Rows update
+as decisions land; supersessions are noted, never silently rewritten
+(ADR-0007 style).
+
+| Decision (ADR-0004) | Status | Implemented in | Proof |
+| --- | --- | --- | --- |
+| Issuer-agnostic token abstraction, short-lived access tokens | Implemented; signing superseded by ADR-0007 (EdDSA/RS256 + JWKS, `kid` rotation) | `backend/platform` (JWTValidator/signer), `backend/identity` | ADR-0007 conformance tests; verifiers hold public keys only |
+| Refresh tokens opaque, hashed, rotated; reuse revokes | Implemented | `backend/identity/sessions.go`, identity 000003/000005 | `backend/identity` session suites (incl. API tests, #87) |
+| Platform validation middleware, explicit public routes | Implemented | `platform.AuthMiddleware` on every service router | per-service route tables + scoping tests |
+| Server-side RBAC, two-layer enforcement (middleware + service) | Implemented | `platform.RequireRole` + per-domain role sets and resource-level re-checks | RBAC tests in every domain (`TestCrossTenant…`, role denial cases) |
+| Append-only audit for privileged actions | Implemented and extended (#88): privileged admin reads (`identity.users.listed`), dispatch scoring decisions (`dispatch.decision.scored`, decision records with inputs hash, chosen technician, score), session management revocations | `backend/identity/audit.go` (read API `GET /v1/admin/audit`), `backend/dispatch/audit.go`, `audit_log` (identity 000004/000006) | audit API authz/tenant-filter tests; dispatch decision recorder tests (incl. append-only trigger) |
+| Admin read surface for the audit trail | Implemented (#88) | `GET /v1/admin/audit` — ADMIN+/paginated/filtered, tenant derived from claims, contract 1:1 | `contracts/identity/openapi.yaml`; `audit_api_test.go` (403 non-admin, tenant filtering) |
+| `tenant_id` mandatory on multi-tenant tables, repository-enforced scope | Implemented; jobs was the last gap — closed by jobs migration 000006 (#88): all four jobs tables carry `tenant_id`, scopes derive isolation fail-closed, child rows denormalize the parent tenant | `backend/jobs/scope.go`, `backend/migrations/jobs/000006*`; vehicles/inspections/payments carried it from inception | jobs scope + PG-gated `TestJobTenantIsolationIntegration`; per-domain cross-tenant denial suites |
+| Cross-tenant denial proven by integration tests | Implemented | per-domain suites; denial indistinguishable from absence (404, no existence leak) | jobs/vehicles/inspections/payments/identity test suites |
+| Argon2id password hashing + breached-password check | Implemented | `backend/identity/password.go`, `breach.go` | password/breach suites |
+| Money in integer minor units; ledger-authoritative integrity | Implemented (KES `bigint CHECK (amount_minor > 0)`, immutable terminal states) | `backend/migrations/payments/000001*`, `backend/payments` | payments suites incl. webhook settlement |
+| AI advisory-only (no write authority) | Structural: no AI service writes durable records; boundary enforced by ADR-0003 role partitioning when it arrives | — (no AI writer exists) | migration role posture (ADR-0003) |
+| Secrets env-injected; webhook HMAC mandatory | Implemented | env config contract (`backend/platform/config.go`); payments webhook signature verification | payments webhook suites |
+| Client-provided ownership/prices/state never trusted | Implemented: ids come from validated claims, states from the owning domain's records and state machines | jobs state machine, dispatch attribution, payments intents | per-domain validation/transition tests |

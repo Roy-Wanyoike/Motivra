@@ -308,3 +308,75 @@ func TestPostgresStoreVerificationFlow(t *testing.T) {
 
 	truncateAll(t, store)
 }
+
+// TestPostgresStoreAuditReadAPI proves the audit read path against real
+// PostgreSQL (issue #88): seeded rows come back newest first through the
+// exact-match filters, the tenant constraint is applied at the query
+// level, pagination clamps, and the append-only trigger still refuses to
+// mutate rows the API just read.
+func TestPostgresStoreAuditReadAPI(t *testing.T) {
+	_, _, store := integrationPool(t)
+	ctx := t.Context()
+
+	tenantA, tenantB := uuid.New(), uuid.New()
+	actor, other := uuid.New(), uuid.New()
+	rows := []struct {
+		action string
+		tenant *uuid.UUID
+		act    *uuid.UUID
+	}{
+		{"dispatch.decision.scored", &tenantA, &actor},
+		{"dispatch.decision.scored", &tenantB, &actor},
+		{"identity.user.registered", nil, nil},
+		{"identity.user.login", nil, &other},
+	}
+	for _, row := range rows {
+		require.NoError(t, store.InsertAudit(ctx, AuditEntry{
+			ActorID: row.act, Action: row.action, ObjectType: "dispatch_decision",
+			ObjectID: uuid.NewString(), TenantID: row.tenant,
+			Metadata: map[string]any{"k": "v"},
+		}))
+	}
+
+	// Unfiltered page, newest first (created_at DESC, id DESC).
+	page, err := store.ListAudit(ctx, AuditFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page, 4)
+	require.Equal(t, "identity.user.login", page[0].Action, "the last insert is newest")
+	for i := 1; i < len(page); i++ {
+		require.Less(t, page[i].ID, page[i-1].ID, "strictly descending append-only ids")
+	}
+	require.NotNil(t, page[0].Metadata, "metadata round-trips as JSONB")
+
+	// Tenant constraint applied at the query level.
+	aPage, err := store.ListAudit(ctx, AuditFilter{TenantID: &tenantA})
+	require.NoError(t, err)
+	require.Len(t, aPage, 1)
+	require.NotNil(t, aPage[0].TenantID)
+	require.Equal(t, tenantA, *aPage[0].TenantID)
+
+	// Actor + action + object-type filters compose.
+	actorPage, err := store.ListAudit(ctx, AuditFilter{ActorID: &actor, Action: "dispatch.decision.scored"})
+	require.NoError(t, err)
+	require.Len(t, actorPage, 2)
+
+	// Pagination: limit/offset walk the newest-first page, and the clamp
+	// bounds an oversized limit.
+	paged, err := store.ListAudit(ctx, AuditFilter{Limit: 2, Offset: 1})
+	require.NoError(t, err)
+	require.Len(t, paged, 2)
+	require.Less(t, paged[0].ID, page[0].ID, "offset skips the newest row")
+
+	// since/until window: a future since excludes everything.
+	future := time.Now().Add(time.Hour)
+	empty, err := store.ListAudit(ctx, AuditFilter{Since: &future})
+	require.NoError(t, err)
+	require.Empty(t, empty)
+
+	// The read API's rows stay append-only: mutation is refused by the
+	// trigger even after they have been projected to a caller.
+	_, err = store.pool.Exec(ctx, `UPDATE audit_log SET action = 'tampered'`)
+	require.Error(t, err, "audit_log is append-only (ADR-0003/0004)")
+
+	truncateAll(t, store)
+}

@@ -103,9 +103,41 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
-const requestColumns = `id, customer_id, vehicle_id, description, location_lat, location_lng, address_text, status, created_at, updated_at`
+const requestColumns = `id, tenant_id, customer_id, vehicle_id, description, location_lat, location_lng, address_text, status, created_at, updated_at`
 
-const jobColumns = `id, service_request_id, customer_id, vehicle_id, status, problem_summary, technician_id, created_at, updated_at`
+const jobColumns = `id, tenant_id, service_request_id, customer_id, vehicle_id, status, problem_summary, technician_id, created_at, updated_at`
+
+// requestScopePredicate renders the visibility condition for service
+// requests (ADR-0004). nextParam is the placeholder the condition starts
+// at. The zero scope fails closed and matches no rows at all.
+func requestScopePredicate(scope ReadScope, nextParam int) (string, []any) {
+	switch {
+	case scope.Operator:
+		return "", nil
+	case scope.TenantID != nil:
+		return fmt.Sprintf("tenant_id = $%d", nextParam), []any{*scope.TenantID}
+	case scope.ViewerID != uuid.Nil:
+		return fmt.Sprintf("customer_id = $%d", nextParam), []any{scope.ViewerID}
+	default:
+		return "1 = 0", nil // zero value: fail closed
+	}
+}
+
+// jobScopePredicate renders the visibility condition for jobs. Mirrors
+// requestScopePredicate with the added technician-assignment linkage for
+// personal principals.
+func jobScopePredicate(scope ReadScope, nextParam int) (string, []any) {
+	switch {
+	case scope.Operator:
+		return "", nil
+	case scope.TenantID != nil:
+		return fmt.Sprintf("tenant_id = $%d", nextParam), []any{*scope.TenantID}
+	case scope.ViewerID != uuid.Nil:
+		return fmt.Sprintf("(customer_id = $%d OR technician_id = $%d)", nextParam, nextParam), []any{scope.ViewerID, scope.ViewerID}
+	default:
+		return "1 = 0", nil // zero value: fail closed
+	}
+}
 
 // CreateRequest implements Store.
 func (s *PostgresStore) CreateRequest(ctx context.Context, r *ServiceRequest) error {
@@ -117,10 +149,10 @@ func (s *PostgresStore) CreateRequest(ctx context.Context, r *ServiceRequest) er
 	}
 	err := s.pool.QueryRow(ctx, `
                 INSERT INTO service_requests
-                        (id, customer_id, vehicle_id, description, location_lat, location_lng, address_text, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        (id, tenant_id, customer_id, vehicle_id, description, location_lat, location_lng, address_text, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING created_at, updated_at`,
-		r.ID, r.CustomerID, r.VehicleID, r.Description, r.LocationLat, r.LocationLng, r.AddressText, r.Status,
+		r.ID, r.TenantID, r.CustomerID, r.VehicleID, r.Description, r.LocationLat, r.LocationLng, r.AddressText, r.Status,
 	).Scan(&r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("jobs: insert service request: %w", err)
@@ -129,16 +161,19 @@ func (s *PostgresStore) CreateRequest(ctx context.Context, r *ServiceRequest) er
 }
 
 // GetRequest implements Store. The scope filters the row at the query
-// level: non-operators only ever match their own requests, so an unknown
-// and a foreign request are indistinguishable (no existence leak).
+// level: an organizational principal matches only its tenant's requests
+// (tenant_id, migration 000006) and a personal principal only its own, so
+// an unknown and a foreign request are indistinguishable (no existence
+// leak).
 func (s *PostgresStore) GetRequest(ctx context.Context, id uuid.UUID, scope ReadScope) (ServiceRequest, error) {
 	query := `SELECT ` + requestColumns + `
                 FROM service_requests
                 WHERE id = $1`
 	args := []any{id}
-	if !scope.Operator {
-		query += ` AND customer_id = $2`
-		args = append(args, scope.ViewerID)
+	pred, predArgs := requestScopePredicate(scope, 2)
+	if pred != "" {
+		query += ` AND ` + pred
+		args = append(args, predArgs...)
 	}
 	row := s.pool.QueryRow(ctx, query, args...)
 	r, err := scanRequest(row)
@@ -187,10 +222,10 @@ func (s *PostgresStore) CreateJob(ctx context.Context, j *Job) error {
 
 	err = tx.QueryRow(ctx, `
                 INSERT INTO jobs
-                        (id, service_request_id, customer_id, vehicle_id, status, problem_summary, technician_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        (id, tenant_id, service_request_id, customer_id, vehicle_id, status, problem_summary, technician_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING created_at, updated_at`,
-		j.ID, j.ServiceRequestID, j.CustomerID, j.VehicleID, j.Status, j.ProblemSummary, j.TechnicianID,
+		j.ID, j.TenantID, j.ServiceRequestID, j.CustomerID, j.VehicleID, j.Status, j.ProblemSummary, j.TechnicianID,
 	).Scan(&j.CreatedAt, &j.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("jobs: insert job: %w", err)
@@ -203,16 +238,19 @@ func (s *PostgresStore) CreateJob(ctx context.Context, j *Job) error {
 }
 
 // GetJob implements Store. The scope filters the row at the query level:
-// non-operators match only jobs they own or are assigned, so an unknown
-// and a foreign job are indistinguishable (no existence leak).
+// an organizational principal matches only its tenant's jobs (tenant_id,
+// migration 000006) and a personal principal only jobs they own or are
+// assigned, so an unknown and a foreign job are indistinguishable (no
+// existence leak).
 func (s *PostgresStore) GetJob(ctx context.Context, id uuid.UUID, scope ReadScope) (Job, error) {
 	query := `SELECT ` + jobColumns + `
                 FROM jobs
                 WHERE id = $1`
 	args := []any{id}
-	if !scope.Operator {
-		query += ` AND (customer_id = $2 OR technician_id = $2)`
-		args = append(args, scope.ViewerID)
+	pred, predArgs := jobScopePredicate(scope, 2)
+	if pred != "" {
+		query += ` AND ` + pred
+		args = append(args, predArgs...)
 	}
 	row := s.pool.QueryRow(ctx, query, args...)
 	j, err := scanJob(row)
@@ -234,11 +272,12 @@ func (s *PostgresStore) UpdateJobStatus(ctx context.Context, jobID uuid.UUID, ne
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var current Status
+	var jobTenant *uuid.UUID
 	err = tx.QueryRow(ctx, `
-                SELECT status
+                SELECT status, tenant_id
                 FROM jobs
                 WHERE id = $1
-                FOR UPDATE`, jobID).Scan(&current)
+                FOR UPDATE`, jobID).Scan(&current, &jobTenant)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("jobs: update job status %s: %w", jobID, ErrJobNotFound)
@@ -254,9 +293,9 @@ func (s *PostgresStore) UpdateJobStatus(ctx context.Context, jobID uuid.UUID, ne
 	}
 
 	if _, err := tx.Exec(ctx, `
-                INSERT INTO job_transitions (job_id, from_status, to_status, actor_id, reason)
-                VALUES ($1, $2, $3, $4, $5)`,
-		jobID, current, newStatus, actorID, reason); err != nil {
+                INSERT INTO job_transitions (job_id, tenant_id, from_status, to_status, actor_id, reason)
+                VALUES ($1, $2, $3, $4, $5, $6)`,
+		jobID, jobTenant, current, newStatus, actorID, reason); err != nil {
 		return fmt.Errorf("jobs: insert job transition: %w", err)
 	}
 
@@ -275,11 +314,12 @@ func (s *PostgresStore) AssignTechnician(ctx context.Context, jobID uuid.UUID, t
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var current Status
+	var jobTenant *uuid.UUID
 	err = tx.QueryRow(ctx, `
-                SELECT status
+                SELECT status, tenant_id
                 FROM jobs
                 WHERE id = $1
-                FOR UPDATE`, jobID).Scan(&current)
+                FOR UPDATE`, jobID).Scan(&current, &jobTenant)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("jobs: assign technician to job %s: %w", jobID, ErrJobNotFound)
@@ -298,9 +338,9 @@ func (s *PostgresStore) AssignTechnician(ctx context.Context, jobID uuid.UUID, t
 	}
 
 	if _, err := tx.Exec(ctx, `
-                INSERT INTO job_assignments (job_id, technician_id, assigned_by, status)
-                VALUES ($1, $2, $3, $4)`,
-		jobID, technicianID, assignedBy, AssignmentStatusAssigned); err != nil {
+                INSERT INTO job_assignments (job_id, tenant_id, technician_id, assigned_by, status)
+                VALUES ($1, $2, $3, $4, $5)`,
+		jobID, jobTenant, technicianID, assignedBy, AssignmentStatusAssigned); err != nil {
 		return fmt.Errorf("jobs: insert job assignment: %w", err)
 	}
 
@@ -312,9 +352,9 @@ func (s *PostgresStore) AssignTechnician(ctx context.Context, jobID uuid.UUID, t
 	}
 
 	if _, err := tx.Exec(ctx, `
-                INSERT INTO job_transitions (job_id, from_status, to_status, actor_id, reason)
-                VALUES ($1, $2, $3, $4, $5)`,
-		jobID, current, StatusAssigned, assignedBy, "technician assigned"); err != nil {
+                INSERT INTO job_transitions (job_id, tenant_id, from_status, to_status, actor_id, reason)
+                VALUES ($1, $2, $3, $4, $5, $6)`,
+		jobID, jobTenant, current, StatusAssigned, assignedBy, "technician assigned"); err != nil {
 		return fmt.Errorf("jobs: insert assignment transition: %w", err)
 	}
 
@@ -333,11 +373,12 @@ func (s *PostgresStore) AcceptAssignment(ctx context.Context, jobID uuid.UUID, t
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var current Status
+	var jobTenant *uuid.UUID
 	err = tx.QueryRow(ctx, `
-                SELECT status
+                SELECT status, tenant_id
                 FROM jobs
                 WHERE id = $1
-                FOR UPDATE`, jobID).Scan(&current)
+                FOR UPDATE`, jobID).Scan(&current, &jobTenant)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("jobs: accept assignment for job %s: %w", jobID, ErrJobNotFound)
@@ -365,9 +406,9 @@ func (s *PostgresStore) AcceptAssignment(ctx context.Context, jobID uuid.UUID, t
 	}
 
 	if _, err := tx.Exec(ctx, `
-                INSERT INTO job_transitions (job_id, from_status, to_status, actor_id, reason)
-                VALUES ($1, $2, $3, $4, $5)`,
-		jobID, current, StatusAccepted, &technicianID, "technician accepted assignment"); err != nil {
+                INSERT INTO job_transitions (job_id, tenant_id, from_status, to_status, actor_id, reason)
+                VALUES ($1, $2, $3, $4, $5, $6)`,
+		jobID, jobTenant, current, StatusAccepted, &technicianID, "technician accepted assignment"); err != nil {
 		return fmt.Errorf("jobs: insert acceptance transition: %w", err)
 	}
 
@@ -378,8 +419,9 @@ func (s *PostgresStore) AcceptAssignment(ctx context.Context, jobID uuid.UUID, t
 }
 
 // ListJobsByStatus implements Store. Operator scopes see the platform-wide
-// page; any other scope is filtered to owned/assigned rows at the query
-// level, so the route's RBAC gate is never the only enforcement layer.
+// page; tenant scopes are filtered to their tenant's rows and personal
+// scopes to owned/assigned rows at the query level, so the route's RBAC
+// gate is never the only enforcement layer.
 func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -394,18 +436,16 @@ func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, lim
                 FROM jobs
                 WHERE status = $1`
 	args := []any{status}
-	if scope.Operator {
-		query += `
-                ORDER BY created_at DESC
-                LIMIT $2 OFFSET $3`
-		args = append(args, limit, offset)
-	} else {
-		query += `
-                AND (customer_id = $2 OR technician_id = $2)
-                ORDER BY created_at DESC
-                LIMIT $3 OFFSET $4`
-		args = append(args, scope.ViewerID, limit, offset)
+	pred, predArgs := jobScopePredicate(scope, 2)
+	if pred != "" {
+		query += ` AND ` + pred
+		args = append(args, predArgs...)
 	}
+	pageParam := len(args) + 1
+	query += fmt.Sprintf(`
+                ORDER BY created_at DESC
+                LIMIT $%d OFFSET $%d`, pageParam, pageParam+1)
+	args = append(args, limit, offset)
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: list jobs by status: %w", err)
@@ -427,21 +467,34 @@ func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, lim
 }
 
 // ListTransitions implements Store. The EXISTS subquery re-applies the job
-// visibility predicate, so transitions of invisible jobs return an empty
-// trail exactly like unknown jobs.
+// visibility predicate for personal scopes and tenant scopes filter on the
+// denormalized tenant_id column, so transitions of invisible jobs return
+// an empty trail exactly like unknown jobs.
 func (s *PostgresStore) ListTransitions(ctx context.Context, jobID uuid.UUID, scope ReadScope) ([]JobTransition, error) {
 	query := `
-                SELECT id, job_id, from_status, to_status, actor_id, reason, created_at
+                SELECT id, job_id, tenant_id, from_status, to_status, actor_id, reason, created_at
                 FROM job_transitions
                 WHERE job_id = $1`
 	args := []any{jobID}
-	if !scope.Operator {
+	switch {
+	case scope.Operator:
+		// Platform-wide trail (RBAC-gated route; audit obligations).
+	case scope.TenantID != nil:
+		// The denormalized tenant column (stamped in-transaction and
+		// backfilled by migration 000006) keeps the trail self-scoped.
+		query += `
+                AND job_transitions.tenant_id = $2`
+		args = append(args, *scope.TenantID)
+	case scope.ViewerID != uuid.Nil:
 		query += `
                 AND EXISTS (
                         SELECT 1 FROM jobs j
                         WHERE j.id = job_transitions.job_id
                                 AND (j.customer_id = $2 OR j.technician_id = $2))`
 		args = append(args, scope.ViewerID)
+	default:
+		query += `
+                AND 1 = 0` // zero scope: fail closed
 	}
 	query += `
                 ORDER BY created_at ASC, id ASC`
@@ -467,7 +520,7 @@ func (s *PostgresStore) ListTransitions(ctx context.Context, jobID uuid.UUID, sc
 
 func scanRequest(row pgx.Row) (ServiceRequest, error) {
 	var r ServiceRequest
-	err := row.Scan(&r.ID, &r.CustomerID, &r.VehicleID, &r.Description, &r.LocationLat, &r.LocationLng,
+	err := row.Scan(&r.ID, &r.TenantID, &r.CustomerID, &r.VehicleID, &r.Description, &r.LocationLat, &r.LocationLng,
 		&r.AddressText, &r.Status, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return ServiceRequest{}, err
@@ -477,7 +530,7 @@ func scanRequest(row pgx.Row) (ServiceRequest, error) {
 
 func scanJob(row pgx.Row) (Job, error) {
 	var j Job
-	err := row.Scan(&j.ID, &j.ServiceRequestID, &j.CustomerID, &j.VehicleID, &j.Status,
+	err := row.Scan(&j.ID, &j.TenantID, &j.ServiceRequestID, &j.CustomerID, &j.VehicleID, &j.Status,
 		&j.ProblemSummary, &j.TechnicianID, &j.CreatedAt, &j.UpdatedAt)
 	if err != nil {
 		return Job{}, err

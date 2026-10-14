@@ -67,7 +67,7 @@ func newScopedTestAPI() http.Handler {
 	srv := platform.NewServer(cfg, platform.NewLogger(cfg.App), platform.WithMiddleware(platform.AuthMiddleware(validator)))
 	Routes(srv.Router, func(h http.HandlerFunc) http.HandlerFunc {
 		return platform.RequireRole(DispatcherRoles, h)
-	})
+	}, nil)
 	return srv
 }
 

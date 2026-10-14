@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,10 +18,12 @@ import (
 // cross-tenant denial"). Two principals' fixtures are seeded; acting as
 // tenant A, every read path must return zero rows from tenant B — and a
 // denial must be indistinguishable from a missing resource (404, no
-// existence leak). The jobs tables carry no tenant_id column yet, so the
-// enforceable principal scope is resource-level: customer ownership
-// (customer_id) and technician assignment (technician_id), with operators
-// as the documented cross-resource surface.
+// existence leak). Isolation derives from the tenant_id columns added by
+// jobs migration 000006 (issue #88): an organizational principal (a token
+// carrying a tenant claim) is bound to its tenant's rows; personal
+// principals keep the resource-level scope (customer ownership
+// customer_id, technician assignment technician_id); operators remain the
+// documented cross-resource surface; and the zero scope fails closed.
 
 // seedTenantJob drives one principal through the API: create a request,
 // convert it to a job, and returns both IDs.
@@ -154,4 +158,140 @@ func mustTransitions(t *testing.T, store *fakeStore, jobID uuid.UUID, scope Read
 	transitions, err := store.ListTransitions(context.Background(), jobID, scope)
 	require.NoError(t, err)
 	return transitions
+}
+
+// mintTenantToken issues a valid HS256 access token carrying a tenant_id
+// claim (an organizational principal). An empty tenant mints a personal
+// token; the malformedTenant sentinel produces a non-UUID tenant claim.
+func mintTenantToken(t *testing.T, sub, role, tenant string) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"sub":  sub,
+		"role": role,
+		"iss":  "motivra-identity",
+		"aud":  []string{"motivra"},
+		"exp":  time.Now().Add(15 * time.Minute).Unix(),
+		"iat":  time.Now().Add(-time.Minute).Unix(),
+	}
+	if tenant != "" {
+		claims["tenant_id"] = tenant
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(httpTestSecret))
+	require.NoError(t, err)
+	return signed
+}
+
+// TestTenantScopedReadsDeriveFromTenantID (issue #88 AC: "Jobs tenancy:
+// schema + scope tests document/derive isolation from tenant_id") proves
+// the ReadScope semantics against the fake store: a tenant claim is the
+// sole boundary for organizational principals; personal principals keep
+// resource-level scope; NULL-tenant (pre-migration and personal) rows stay
+// visible only through the resource scope; the zero scope still fails
+// closed.
+func TestTenantScopedReadsDeriveFromTenantID(t *testing.T) {
+	t.Parallel()
+	svc, store, _ := newFixture()
+	ctx := context.Background()
+
+	// One job per tenant, each created through the real service so the
+	// tenant stamping (request -> job inheritance) is itself exercised.
+	tenantA, tenantB := uuid.New(), uuid.New()
+	customerA, customerB := uuid.New(), uuid.New()
+	jobA := seedTenantRequestAndJob(t, svc, customerA, &tenantA)
+	jobB := seedTenantRequestAndJob(t, svc, customerB, &tenantB)
+	require.Equal(t, tenantA, *jobA.TenantID, "the job inherits the request's tenant")
+	require.Equal(t, tenantB, *jobB.TenantID)
+
+	// A tenant A principal reads tenant A's job and only tenant A's jobs.
+	got, err := svc.GetJob(ctx, jobA.ID, tenantScope(tenantA))
+	require.NoError(t, err)
+	require.Equal(t, jobA.ID, got.ID)
+
+	page, err := svc.JobsByStatus(ctx, StatusCreated, 50, 0, tenantScope(tenantA))
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	assert.Equal(t, jobA.ID, page[0].ID, "a tenant page contains only that tenant's rows")
+
+	// Tenant B cannot read tenant A's job or its trail: cross-tenant denial.
+	_, err = svc.GetJob(ctx, jobA.ID, tenantScope(tenantB))
+	require.True(t, errors.Is(err, ErrJobNotFound), "cross-tenant get must be not-found, got %v", err)
+	assert.Empty(t, mustTransitions(t, store, jobA.ID, tenantScope(tenantB)), "cross-tenant trail must read as empty")
+
+	// A tenant-mate (different subject, same tenant claim) CAN read it:
+	// isolation derives from tenant_id, not from the subject id.
+	mate := ReadScope{ViewerID: uuid.New(), TenantID: &tenantA}
+	_, err = svc.GetJob(ctx, jobA.ID, mate)
+	require.NoError(t, err, "a tenant-mate shares the organization's boundary")
+
+	// A NULL-tenant row (pre-migration backfill posture / personal row) is
+	// invisible to every tenant scope but remains visible to its customer
+	// through the resource scope.
+	personal := jobInStore(t, store, StatusCreated)
+	_, err = svc.GetJob(ctx, personal.ID, tenantScope(tenantA))
+	require.True(t, errors.Is(err, ErrJobNotFound), "tenant scopes never see NULL-tenant rows, got %v", err)
+	_, err = svc.GetJob(ctx, personal.ID, viewScope(personal.CustomerID))
+	require.NoError(t, err, "personal rows keep the resource-level scope (documented backfill posture)")
+
+	// The zero scope still fails closed with the tenancy columns present.
+	_, err = svc.GetJob(ctx, jobA.ID, ReadScope{})
+	require.True(t, errors.Is(err, ErrJobNotFound), "zero scope must match nothing, got %v", err)
+	empty, err := store.ListJobsByStatus(ctx, StatusCreated, 10, 0, ReadScope{})
+	require.NoError(t, err)
+	assert.Empty(t, empty, "zero scope must return an empty page")
+}
+
+// seedTenantRequestAndJob runs one customer (with the given tenant, which
+// may be nil for a personal principal) through request -> CREATED job.
+func seedTenantRequestAndJob(t *testing.T, svc *Service, customerID uuid.UUID, tenantID *uuid.UUID) Job {
+	t.Helper()
+	req := &ServiceRequest{
+		TenantID:    tenantID,
+		CustomerID:  customerID,
+		Description: "Fleet vehicle will not start",
+	}
+	require.NoError(t, svc.CreateRequest(context.Background(), req))
+	job, err := svc.CreateJobFromRequest(context.Background(), req.ID, opScope())
+	require.NoError(t, err)
+	return job
+}
+
+// TestTenantClaimScopesHTTPReads proves the HTTP surface: a tenant claim
+// in the validated token binds the principal to the tenant's rows (a
+// tenant-mate reads the job, another tenant does not, with the identical
+// 404 as an unknown job), and a malformed tenant claim fails closed as
+// 401 — the scope is derived from claims, never widened by client input.
+func TestTenantClaimScopesHTTPReads(t *testing.T) {
+	t.Parallel()
+	h, _, pub, _ := newTestAPI(t)
+
+	tenantA, tenantB := uuid.New(), uuid.New()
+	tokenA1 := mintTenantToken(t, uuid.New().String(), RoleCustomer, tenantA.String())
+	tokenA2 := mintTenantToken(t, uuid.New().String(), RoleCustomer, tenantA.String())
+	tokenB := mintTenantToken(t, uuid.New().String(), RoleCustomer, tenantB.String())
+
+	req := createRequestOverHTTP(t, h, tokenA1)
+	job := createJobOverHTTP(t, h, tokenA1, req["id"].(string))
+	jobID := job["id"].(string)
+	require.NotEmpty(t, pub.ofType(t, EventJobCreated), "the creation flow publishes its event")
+
+	// The creating principal reads their job.
+	w := do(t, h, http.MethodGet, "/v1/jobs/"+jobID, tokenA1, nil)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	// A same-tenant principal reads it too: the boundary is the tenant.
+	w = do(t, h, http.MethodGet, "/v1/jobs/"+jobID, tokenA2, nil)
+	require.Equal(t, http.StatusOK, w.Code, "a tenant-mate reads the organization's job")
+
+	// Another tenant gets the identical 404 as an unknown job.
+	w = do(t, h, http.MethodGet, "/v1/jobs/"+jobID, tokenB, nil)
+	require.Equal(t, http.StatusNotFound, w.Code, "cross-tenant reads are denied without an existence leak")
+	assert.Equal(t, "not_found", decodeBody(t, w)["code"])
+
+	// A malformed tenant claim is an authentication failure, not a 500 or a
+	// scopeless read.
+	bad := mintTenantToken(t, uuid.New().String(), RoleCustomer, "not-a-uuid")
+	w = do(t, h, http.MethodGet, "/v1/jobs/"+jobID, bad, nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code, "malformed tenant claims fail closed")
+	w = do(t, h, http.MethodPost, "/v1/requests", bad, []byte(`{"description":"x"}`))
+	require.Equal(t, http.StatusUnauthorized, w.Code, "malformed tenant claims cannot create rows")
 }

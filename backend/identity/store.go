@@ -63,6 +63,12 @@ type SessionStore interface {
 	AssignRole(ctx context.Context, userID uuid.UUID, role Role, tenantID *uuid.UUID) error
 	// InsertAudit appends one audit record.
 	InsertAudit(ctx context.Context, entry AuditEntry) error
+	// ListAudit returns one filtered page of audit records, newest
+	// first (created_at DESC, id DESC) — the read side of the admin
+	// audit API (issue #88). The filter's constraints are exact-match;
+	// the tenant field is scope enforced at the query level exactly
+	// like every other ADR-0004 boundary: a caller never widens it.
+	ListAudit(ctx context.Context, filter AuditFilter) ([]AuditRecord, error)
 
 	// UpdatePassword replaces the user's password hash (issue #86
 	// password-change flow). Unknown users yield ErrUserNotFound.
@@ -455,6 +461,67 @@ func (s *PostgresStore) InsertAudit(ctx context.Context, entry AuditEntry) error
 		return fmt.Errorf("insert audit: %w", err)
 	}
 	return nil
+}
+
+// ListAudit implements SessionStore. Every constraint is a parameterized
+// equality/range applied at the query level; there is no unscoped variant
+// of the tenant condition — the caller's claims decide it (ADR-0004).
+func (s *PostgresStore) ListAudit(ctx context.Context, filter AuditFilter) ([]AuditRecord, error) {
+	filter.clamp()
+	query := `SELECT id, actor_id, action, object_type, object_id, tenant_id, metadata, created_at
+                 FROM audit_log`
+	var conds []string
+	var args []any
+	add := func(cond string, val any) {
+		args = append(args, val)
+		conds = append(conds, fmt.Sprintf(cond, len(args)))
+	}
+	if filter.ActorID != nil {
+		add("actor_id = $%d", *filter.ActorID)
+	}
+	if filter.Action != "" {
+		add("action = $%d", filter.Action)
+	}
+	if filter.ObjectType != "" {
+		add("object_type = $%d", filter.ObjectType)
+	}
+	if filter.ObjectID != "" {
+		add("object_id = $%d", filter.ObjectID)
+	}
+	if filter.TenantID != nil {
+		add("tenant_id = $%d", *filter.TenantID)
+	}
+	if filter.Since != nil {
+		add("created_at >= $%d", *filter.Since)
+	}
+	if filter.Until != nil {
+		add("created_at < $%d", *filter.Until)
+	}
+	if len(conds) > 0 {
+		query += " WHERE " + strings.Join(conds, " AND ")
+	}
+	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d`, len(args)+1, len(args)+2)
+	args = append(args, filter.Limit, filter.Offset)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list audit: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AuditRecord
+	for rows.Next() {
+		var r AuditRecord
+		if err := rows.Scan(&r.ID, &r.ActorID, &r.Action, &r.ObjectType, &r.ObjectID,
+			&r.TenantID, &r.Metadata, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan audit record: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list audit: %w", err)
+	}
+	return out, nil
 }
 
 // UpdatePassword replaces the user's password hash and bumps updated_at.

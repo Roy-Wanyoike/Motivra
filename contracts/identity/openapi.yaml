@@ -22,6 +22,8 @@ tags:
     description: Token issuance, rotation, revocation and refresh-session management.
   - name: users
     description: Authenticated account access and admin listing.
+  - name: audit
+    description: Admin read surface over the append-only audit trail (issue 88, ADR-0004).
 paths:
   /v1/auth/register:
     post:
@@ -449,7 +451,9 @@ paths:
       tags: [users]
       summary: List accounts (ADMIN or SUPER_ADMIN)
       description: Newest-first, offset-based pagination. limit is clamped to
-        1-100 (default 20); offset floors at 0.
+        1-100 (default 20); offset floors at 0. The privileged read is
+        itself audited (issue 88, ADR-0004) as identity.users.listed with
+        the acting admin, their tenant scope and the page shape.
       security:
         - bearerAuth: []
       parameters:
@@ -489,6 +493,120 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '422':
           description: limit or offset is not an integer.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/admin/audit:
+    get:
+      operationId: listAuditRecords
+      tags: [audit]
+      summary: Read the append-only audit trail (ADMIN or SUPER_ADMIN)
+      description: |
+        One filtered, paginated page of the platform's write-once audit
+        trail (issue #88), newest first (created_at DESC, id DESC). The
+        trail covers identity lifecycle events, privileged admin reads
+        (including the account directory listing itself), dispatch
+        decision records (inputs hash, chosen technician, score) and job
+        assignment records written by the other domains.
+
+        Filters are exact-match: action, object_type, object_id, actor_id;
+        since (created_at >= since) and until (created_at < until) take
+        RFC 3339 timestamps; limit is clamped to 1-100 (default 20) and
+        offset floors at 0.
+
+        Tenant scope is derived from the validated access token, never
+        from the caller: an ADMIN whose token carries a tenant_id claim is
+        always filtered to that tenant and no query parameter widens it. A
+        SUPER_ADMIN reads the platform-wide trail and may narrow it with
+        the tenant_id query parameter. A malformed tenant claim is an
+        authentication failure (fail closed).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: Exact action match, e.g. dispatch.decision.scored.
+          schema:
+            type: string
+        - name: object_type
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: object_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: actor_id
+          in: query
+          required: false
+          description: Exact acting-principal match (UUID).
+          schema:
+            type: string
+            format: uuid
+        - name: tenant_id
+          in: query
+          required: false
+          description: >
+            Tenant narrowing filter. Honoured only for SUPER_ADMIN (an
+            ADMIN is always bound to their own tenant claim, so this
+            parameter cannot widen their scope).
+          schema:
+            type: string
+            format: uuid
+        - name: since
+          in: query
+          required: false
+          description: Return rows with created_at at or after this instant.
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          required: false
+          description: Return rows with created_at strictly before this instant.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: One page of audit records, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditList'
+        '401':
+          description: Missing or invalid access token (including a malformed tenant claim).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Caller lacks ADMIN or SUPER_ADMIN.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: A filter or pagination parameter is malformed.
           content:
             application/problem+json:
               schema:
@@ -756,3 +874,63 @@ components:
                 type: string
               issue:
                 type: string
+    AuditList:
+      type: object
+      required: [entries, limit, offset]
+      properties:
+        entries:
+          type: array
+          description: One page of audit records, newest first.
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        limit:
+          type: integer
+          description: Effective page size after clamping.
+        offset:
+          type: integer
+          description: Effective offset after clamping.
+    AuditEntry:
+      type: object
+      description: >
+        One write-once audit record (ADR-0003 append-only rules, ADR-0004
+        privileged-action auditing). actor_id and tenant_id are null for
+        system-originated or personal rows; metadata carries the
+        action-specific attribution (for dispatch decision records: the
+        decision inputs hash, chosen technician, chosen score and weight
+        set).
+      required: [id, action, object_type, object_id, metadata, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Append-only row sequence number.
+        actor_id:
+          nullable: true
+          type: string
+          format: uuid
+          description: The acting principal; null for system actors.
+        action:
+          type: string
+          description: >
+            Dotted action identifier, e.g. identity.user.registered,
+            identity.users.listed, dispatch.decision.scored,
+            jobs.assignment.dispatched.
+        object_type:
+          type: string
+        object_id:
+          type: string
+          description: >
+            The acted-on object's identifier, or the literal "collection"
+            for collection reads.
+        tenant_id:
+          nullable: true
+          type: string
+          format: uuid
+        metadata:
+          type: object
+          description: Action-specific attribution data; never credential material.
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+          description: Server-side write time of the audit row.

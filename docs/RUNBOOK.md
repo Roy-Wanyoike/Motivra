@@ -43,7 +43,8 @@ export MOTIVRA_JWT_SECRET='dev-only-insecure-jwt-secret-change-me-32b'   # any >
 go run ./cmd/identity      # :8080  — auth, tokens, RBAC
 go run ./cmd/vehicles      # :8080  — registry, history, passport
 go run ./cmd/jobs          # :8080  — requests, state machine, assignments
-go run ./cmd/dispatch      # :8080  — stateless scoring (no DB client)
+go run ./cmd/dispatch      # :8080  — stateless scoring; with MOTIVRA_DATABASE_URL
+                           set, scoring decisions are appended to audit_log (#88)
 ```
 
 Env names are the contract in `backend/platform/config.go`; copy
@@ -117,7 +118,7 @@ instead (issue #82). App services also get compose readiness healthchecks
 | identity | `127.0.0.1:8081 : 8080` | readiness `/readyz` |
 | vehicles | `127.0.0.1:8082 : 8080` | readiness `/readyz` |
 | jobs | `127.0.0.1:8083 : 8080` | readiness `/readyz` |
-| dispatch | `127.0.0.1:8084 : 8080` | stateless; no DB client |
+| dispatch | `127.0.0.1:8084 : 8080` | stateless scoring; appends decision records to `audit_log` (#88) |
 
 First boot takes a minute: each service waits for postgres health, then
 applies its own migration chain inside the shared `motivra` database.
@@ -236,8 +237,6 @@ docker compose -f docker-compose.observability.yml up -d
 - Data ships to container-local volumes: mount durable storage and set
   retention before relying on this beyond evaluation.
 
----
-
 ## 5a. Data operations (backup, restore, retention, integrity)
 
 Operational commands introduced by the integrity/compliance pass (issue
@@ -262,6 +261,38 @@ Rules:
 - **Retention schedule:** sessions purge = daily (cron); audit purge =
   monthly, 18-month window by default; integrity check = weekly and after
   every restore/cleanup.
+
+---
+
+### 5b. Exception events — the panic/error-tracking path (issue #88)
+
+Panics never vanish into stdout alone. The platform's panic-recovery
+middleware converts a recovered handler panic into the usual 500
+problem+json AND records an **OpenTelemetry exception event** on the
+request's server span (`exception.type`, `exception.message`,
+`exception.stacktrace` per the OTel semconv) with the span marked Error;
+the structured panic log line additionally carries `panic_type` and the
+stack trace. The pipeline (ADR-0005: OTel-only, no vendor APM):
+
+1. **Where to look:** Grafana (§5) → Tempo trace view. Filter for spans
+   with status Error (or query Loki for the panic lines below) and open
+   the trace — the exception event with its stack trace is on the server
+   span, one click from the failing request.
+2. **Log-side hunt:** Loki query `{service="identity"} |= "panic_recovered"`
+   (substitute the service). Every recovered-panic line carries the panic
+   value, `panic_type`, the stack trace, `request_id` and `trace_id`;
+   paste the `trace_id` into Tempo to get the full request path around
+   the crash.
+3. **Triage:** treat any recovered panic as a bug (the 500 response hides
+   internals from the caller by design — the trace is the debugging
+   surface), correlate `exception.type` counts per service in the golden
+   signals dashboard, and file with the stack trace attached.
+
+A Sentry-style SaaS error tracker remains a **follow-up decision**, not
+part of this change: the OTel exception events above already make panics
+queryable in the deployed stack, and adopting a vendor would re-decide the
+ADR-0005 posture (exporter swap at the collector) — revisit when crash
+grouping/alerting across services is actually needed.
 
 ---
 

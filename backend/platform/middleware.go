@@ -2,14 +2,17 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -54,17 +57,51 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 }
 
 // recoverer converts handler panics into 500 problem+json responses and
-// logs the stack; a panic must never take the process down.
+// logs the stack; a panic must never take the process down. Every recovered
+// panic is also recorded as an OpenTelemetry exception event on the active
+// request span (exception.type, exception.message, exception.stacktrace —
+// OTel semconv) and the span is marked Error, so panics surface in the
+// observability stack wherever spans are shipped (error tracking, issue
+// #88; ADR-0005 rejected a vendor APM in favour of the OTel pipeline).
 func (s *Server) recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				FromContext(r.Context()).Error("panic_recovered", "panic", rec)
+				stack := debug.Stack()
+				recordPanicException(r.Context(), rec, stack)
+				FromContext(r.Context()).Error("panic_recovered",
+					"panic", rec,
+					"panic_type", fmt.Sprintf("%T", rec),
+					"stack", string(stack),
+				)
 				WriteError(w, ErrInternal())
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// recordPanicException stamps the recovered panic onto the active span as
+// an OTel exception event. It is a no-op without a recording span (tracing
+// disabled or the request never entered traceMiddleware).
+func recordPanicException(ctx context.Context, rec any, stack []byte) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+	// A panic value is not necessarily an error, but the OTel exception
+	// event contract is error-shaped: the event carries the concrete panic
+	// type, value and stack per the semconv. AddEvent (not RecordError)
+	// keeps exception.type the PANIC's type — RecordError would report its
+	// own wrapper type instead.
+	span.AddEvent("exception",
+		trace.WithAttributes(
+			attribute.String("exception.type", fmt.Sprintf("%T", rec)),
+			attribute.String("exception.message", fmt.Sprint(rec)),
+			attribute.String("exception.stacktrace", string(stack)),
+		),
+	)
+	span.SetStatus(codes.Error, "panic recovered")
 }
 
 // traceMiddleware starts a server span per request, records the status

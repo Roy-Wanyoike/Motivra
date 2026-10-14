@@ -32,7 +32,7 @@ func testGate(role string) func(http.HandlerFunc) http.HandlerFunc {
 
 func newTestRouter(role string) http.Handler {
 	r := chi.NewRouter()
-	Routes(r, testGate(role))
+	Routes(r, testGate(role), nil)
 	return r
 }
 

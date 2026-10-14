@@ -40,17 +40,25 @@ const (
 // require wraps every handler with the platform authentication and RBAC
 // gate; pass a function that enforces platform.RequireRole with
 // DispatcherRoles. The AuthMiddleware must already be part of the router
-// middleware chain so ClaimsFromContext resolves.
-func Routes(r chi.Router, require func(http.HandlerFunc) http.HandlerFunc) {
+// middleware chain so ClaimsFromContext resolves. recorder (optional,
+// issue #88) appends one decision record to the audit trail per
+// successful scoring call; nil disables persistence (tests, deployments
+// without a database — a boot warning is expected there). When a recorder
+// IS configured, a failed record fails the request: the audit signal is
+// never lost silently (ADR-0004).
+func Routes(r chi.Router, require func(http.HandlerFunc) http.HandlerFunc, recorder DecisionRecorder) {
 	r.Route("/v1/dispatch", func(r chi.Router) {
-		r.Post("/score", require(handleScore))
+		r.Post("/score", require(scoreWithRecorder(recorder)))
 		r.Get("/factors", require(handleFactors))
 	})
 }
 
 // scoreRequest is the POST /v1/dispatch/score body. Weights are optional:
-// when omitted the engine applies DefaultWeights.
+// when omitted the engine applies DefaultWeights. job_id is optional
+// attribution (issue #88): when set, the persisted decision record links
+// the scoring to the job being staffed.
 type scoreRequest struct {
+	JobID      *uuid.UUID  `json:"job_id,omitempty"`
 	JobContext JobContext  `json:"job_context"`
 	Candidates []Candidate `json:"candidates"`
 	Weights    *Weights    `json:"weights,omitempty"`
@@ -69,51 +77,118 @@ type factorCatalogueResponse struct {
 	DefaultWeights Weights      `json:"default_weights"`
 }
 
-// handleScore implements POST /v1/dispatch/score. It validates the weight
-// set and inputs, then scores the candidate set with the stateless engine.
+// handleScore implements POST /v1/dispatch/score with no decision
+// persistence (the pre-#88 shape, kept for direct callers and tests).
 func handleScore(w http.ResponseWriter, r *http.Request) {
+	scoreWithRecorder(nil)(w, r)
+}
+
+// scoreWithRecorder returns the POST /v1/dispatch/score handler bound to
+// a decision recorder. The computation is the stateless engine; the
+// recorder (when configured) appends one decision record — actor, tenant,
+// inputs hash, chosen technician, score — and a failed record fails the
+// request with a 500 (fail closed, ADR-0004).
+func scoreWithRecorder(recorder DecisionRecorder) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req, resp, err := computeScores(r)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		if recorder != nil {
+			record, recordErr := decisionRecordFromRequest(r, req, resp)
+			if recordErr == nil {
+				recordErr = recorder.RecordDecision(r.Context(), record)
+			}
+			if recordErr != nil {
+				platform.WriteError(w, fmt.Errorf("record dispatch decision: %w", recordErr))
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// computeScores decodes and validates the scoring request and runs the
+// stateless engine, returning the request and the response (whose weights
+// are the APPLIED weight set — defaults included when omitted).
+func computeScores(r *http.Request) (scoreRequest, scoreResponse, error) {
 	req, err := platform.DecodeJSON[scoreRequest](r, maxRequestBytes)
 	if err != nil {
-		platform.WriteError(w, err)
-		return
+		return scoreRequest{}, scoreResponse{}, err
+	}
+	if req.JobID != nil && *req.JobID == uuid.Nil {
+		return scoreRequest{}, scoreResponse{}, platform.ErrValidation(
+			"job_id must be a non-zero UUID",
+			platform.FieldError{Field: "job_id", Issue: "invalid"},
+		)
 	}
 
 	weights := DefaultWeights()
 	if req.Weights != nil {
 		weights = *req.Weights
 		if verr := weights.Validate(); verr != nil {
-			platform.WriteError(w, platform.ErrValidation(
+			return scoreRequest{}, scoreResponse{}, platform.ErrValidation(
 				verr.Error(),
 				platform.FieldError{Field: "weights", Issue: verr.Error()},
-			))
-			return
+			)
 		}
 	}
 
 	if len(req.Candidates) == 0 {
-		platform.WriteError(w, platform.ErrValidation(
+		return scoreRequest{}, scoreResponse{}, platform.ErrValidation(
 			"at least one candidate is required",
 			platform.FieldError{Field: "candidates", Issue: "must contain at least one candidate"},
-		))
-		return
+		)
 	}
 	if len(req.Candidates) > maxCandidatesPerRequest {
-		platform.WriteError(w, platform.ErrValidation(
+		return scoreRequest{}, scoreResponse{}, platform.ErrValidation(
 			fmt.Sprintf("at most %d candidates per request", maxCandidatesPerRequest),
 			platform.FieldError{Field: "candidates", Issue: fmt.Sprintf("must contain at most %d candidates", maxCandidatesPerRequest)},
-		))
-		return
+		)
 	}
 
 	fieldErrs := validateJobContext(req.JobContext)
 	fieldErrs = append(fieldErrs, validateCandidates(req.Candidates)...)
 	if len(fieldErrs) > 0 {
-		platform.WriteError(w, platform.ErrValidation("request contains invalid fields", fieldErrs...))
-		return
+		return scoreRequest{}, scoreResponse{}, platform.ErrValidation("request contains invalid fields", fieldErrs...)
 	}
 
-	scores := ScoreCandidates(req.Candidates, req.JobContext, weights)
-	writeJSON(w, http.StatusOK, scoreResponse{Weights: weights, Scores: scores})
+	return req, scoreResponse{Weights: weights, Scores: ScoreCandidates(req.Candidates, req.JobContext, weights)}, nil
+}
+
+// decisionRecordFromRequest assembles the audited decision record: full
+// attribution comes from the validated access-token claims (never from
+// client input); the chosen technician is the engine's top-ranked score.
+func decisionRecordFromRequest(r *http.Request, req scoreRequest, resp scoreResponse) (DecisionRecord, error) {
+	claims, ok := platform.ClaimsFromContext(r.Context())
+	if !ok {
+		return DecisionRecord{}, platform.ErrUnauthorized("authentication required")
+	}
+	actor, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		return DecisionRecord{}, platform.ErrUnauthorized("authenticated subject is not a user identifier")
+	}
+	var tenant *uuid.UUID
+	if claims.TenantID != "" {
+		parsed, parseErr := uuid.Parse(claims.TenantID)
+		if parseErr != nil {
+			return DecisionRecord{}, platform.ErrUnauthorized("authenticated tenant claim is not a tenant identifier")
+		}
+		tenant = &parsed
+	}
+	chosen := resp.Scores[0] // scores are sorted by total descending; candidates >= 1 is validated
+	return DecisionRecord{
+		DecisionID:         uuid.New(),
+		ActorID:            actor,
+		TenantID:           tenant,
+		JobID:              req.JobID,
+		InputsHash:         InputsHash(req.JobContext, req.Candidates, resp.Weights),
+		ChosenTechnicianID: chosen.TechnicianID,
+		ChosenScore:        chosen.Total,
+		CandidateCount:     len(req.Candidates),
+		Weights:            resp.Weights,
+	}, nil
 }
 
 // handleFactors implements GET /v1/dispatch/factors: the static factor
