@@ -124,6 +124,15 @@ make docker-build SVC=identity    # SVC ∈ {identity, vehicles, jobs, dispatch}
 
 ## 4. Seeding demo data
 
+> **PRODUCTION WARNING — read before running any command in this section.**
+> Demo seed data carries a **public** password (`MotivraDemo!2026`) and
+> role-bearing demo accounts. It must never exist in a database that serves
+> live customers. The script enforces this: it refuses to run without
+> `ALLOW_DEMO_SEED=1`, and refuses unconditionally when
+> `MOTIVRA_ENV=production`. After any demo seeding session, wipe the target
+> volume (`docker compose -f docker-compose.app.yml down -v`) before
+> deploying anywhere customer-facing.
+
 `scripts/seed_demo.sh` inserts, in **one transaction**: a demo tenant id,
 one garage (its GARAGE-role admin — see note), three technicians, one
 customer, two vehicles with four passport-history entries, and one job in
@@ -144,8 +153,8 @@ Seeded logins (public demo credential — **not** a secret):
 Honest notes:
 - There is **no `tenants` table yet** — the "demo tenant" is a fixed UUID
   used in `tenant_id` columns (`user_roles`, `vehicles`).
-- There is **no `garages` table yet** (`backend/migrations/garages/` is a
-  stub chain) — the garage is represented by its GARAGE-role user until
+- There is **no `garages` table yet** (no `backend/migrations/garages/`
+  chain exists) — the garage is represented by its GARAGE-role user until
   that domain ships.
 
 ---

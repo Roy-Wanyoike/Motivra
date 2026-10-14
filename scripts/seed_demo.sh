@@ -28,14 +28,35 @@
 # VerifyPassword). This is a PUBLIC demo credential, not a secret.
 #
 # Usage:
-#   scripts/seed_demo.sh [CONNECTION_URL]
-#   MOTIVRA_DATABASE_URL=... scripts/seed_demo.sh
+#   scripts/seed_demo.sh [CONNECTION_URL]          (refuses — see guard below)
+#   ALLOW_DEMO_SEED=1 scripts/seed_demo.sh [URL]   (explicit demo opt-in)
+#   MOTIVRA_DATABASE_URL=... ALLOW_DEMO_SEED=1 scripts/seed_demo.sh
 #
 # Resolution order: $1 > MOTIVRA_DATABASE_URL > default (app stack mapping:
 # postgres 5433 on localhost — `make stack-up` exposes it there; for the
 # dev deps stack pass postgres://motivra:motivra@localhost:5432/motivra?sslmode=disable).
+#
+# PRODUCTION GUARD: this script creates users with a PUBLIC password. It
+# refuses to run unless BOTH of the following hold:
+#   1. ALLOW_DEMO_SEED=1 is set (explicit acknowledgement that the target
+#      is a throwaway/demo database), and
+#   2. MOTIVRA_ENV is unset or not "production".
+# `make seed` sets the opt-in for local development convenience; any
+# unattended or CI invocation must set it explicitly. Never point this
+# script at a database that serves live customers.
 
 set -euo pipefail
+
+if [[ "${ALLOW_DEMO_SEED:-0}" != "1" ]]; then
+  echo "refusing to seed demo data: ALLOW_DEMO_SEED=1 is required to confirm the" >&2
+  echo "target is a throwaway/demo database, not one serving live customers" >&2
+  exit 3
+fi
+if [[ "${MOTIVRA_ENV:-development}" == "production" ]]; then
+  echo "refusing to seed demo data: MOTIVRA_ENV=production — demo users carry a" >&2
+  echo "public password and must never exist in a production database" >&2
+  exit 3
+fi
 
 CONN="${1:-${MOTIVRA_DATABASE_URL:-postgres://motivra:motivra@localhost:5433/motivra?sslmode=disable}}"
 

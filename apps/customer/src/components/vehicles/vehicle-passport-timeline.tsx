@@ -25,8 +25,6 @@ const HISTORY_EVENT_TYPES = [
 ] as const;
 
 export function VehiclePassportTimeline({ vehicleId }: { vehicleId: string }) {
-  const isSample = vehicleId === "sample";
-
   return (
     <article aria-labelledby="passport-heading" className="rounded-lg border border-slate-200 bg-white p-6">
       <p className="text-xs font-semibold uppercase tracking-widest text-amber-700">
@@ -38,13 +36,6 @@ export function VehiclePassportTimeline({ vehicleId }: { vehicleId: string }) {
       <p className="mt-2 text-sm text-slate-600">
         Vehicle ID: <code className="rounded bg-slate-100 px-1.5 py-0.5">{vehicleId}</code>
       </p>
-
-      {isSample ? (
-        <p className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm leading-relaxed text-slate-900">
-          Sample route. This is a placeholder page for the passport timeline component — no real
-          vehicle exists behind it and no data is fetched.
-        </p>
-      ) : null}
 
       <p className="mt-4 max-w-3xl text-sm leading-relaxed">
         Placeholder — no data fetched. Once connected, this timeline will render the passport

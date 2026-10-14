@@ -29,7 +29,7 @@ services:
     # the geospatial substrate").
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-motivra}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-motivra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — generate with: openssl rand -base64 24}
       POSTGRES_DB: ${POSTGRES_DB:-motivra}
     ports:
       - "5433:5432"
@@ -94,10 +94,10 @@ services:
       MOTIVRA_APP_NAME: identity
       MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
       MOTIVRA_PORT: "8080"
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -123,10 +123,10 @@ services:
       MOTIVRA_APP_NAME: vehicles
       MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
       MOTIVRA_PORT: "8080"
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -152,10 +152,10 @@ services:
       MOTIVRA_APP_NAME: jobs
       MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
       MOTIVRA_PORT: "8080"
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -184,10 +184,10 @@ services:
       # Dispatch is stateless (no database client), but platform.Config.
       # Validate() requires MOTIVRA_DATABASE_URL outside the test env —
       # the value is present-but-unused for this service.
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:-motivra}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me-32b}
+      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
