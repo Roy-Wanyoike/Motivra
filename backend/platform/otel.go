@@ -85,6 +85,8 @@ type Metrics struct {
 	Handler http.Handler
 	HTTP    *HTTPMetrics
 	Stop    func(context.Context) error
+
+	registry *promreg.Registry
 }
 
 func SetupMetrics(serviceName, environment string) (*Metrics, error) {
@@ -97,5 +99,17 @@ func SetupMetrics(serviceName, environment string) (*Metrics, error) {
 		Handler: handler,
 		HTTP:    NewHTTPMetrics(registry, serviceName),
 		Stop:    func(context.Context) error { return nil },
+
+		registry: registry,
 	}, nil
+}
+
+// Registry returns the underlying Prometheus registry so services can
+// register domain-specific collectors (counters, gauges, histograms) on
+// the same exposition the platform instruments live on.
+func (m *Metrics) Registry() *promreg.Registry {
+	if m == nil {
+		return nil
+	}
+	return m.registry
 }
