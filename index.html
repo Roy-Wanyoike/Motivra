@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Motivra — service origin</title>
+    <meta name="robots" content="noindex" />
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        background: #f8fafc;
+        color: #334155;
+        line-height: 1.6;
+      }
+      .wrap {
+        max-width: 44rem;
+        margin: 0 auto;
+        padding: 3rem 1.25rem 4rem;
+      }
+      .brand {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #0f172a;
+        letter-spacing: -0.01em;
+      }
+      .brand span {
+        color: #d97706;
+      }
+      h1 {
+        font-size: 1.5rem;
+        color: #0f172a;
+        margin: 2rem 0 0.5rem;
+        letter-spacing: -0.02em;
+      }
+      .card {
+        background: #fffbeb;
+        border: 1px solid #fcd34d;
+        border-radius: 0.5rem;
+        padding: 1rem 1.25rem;
+        margin: 1.5rem 0;
+      }
+      ul {
+        padding-left: 1.25rem;
+      }
+      li {
+        margin: 0.4rem 0;
+      }
+      a {
+        color: #b45309;
+      }
+      code {
+        background: #e2e8f0;
+        border-radius: 0.25rem;
+        padding: 0.1rem 0.35rem;
+        font-size: 0.875em;
+      }
+      footer {
+        margin-top: 2.5rem;
+        font-size: 0.875rem;
+        color: #64748b;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <p class="brand">Motivra <span>Drive</span></p>
+      <h1>This is a backend service origin — not the product UI</h1>
+      <p>
+        This deployment carries no customer-facing application. The Motivra
+        backend services (identity, vehicles, jobs, dispatch) run on the
+        platform&rsquo;s own infrastructure as long-running processes with their
+        own Postgres and NATS dependencies &mdash; they are not hosted here, and
+        no API routes are exposed on this domain.
+      </p>
+      <div class="card">
+        <strong>Looking for the product?</strong> The customer web app &mdash;
+        Motivra Drive &mdash; lives at
+        <a href="https://motivra-youngsharksites.vercel.app/"
+          >motivra-youngsharksites.vercel.app</a
+        >.
+      </div>
+      <ul>
+        <li>
+          Customer web app:
+          <a href="https://motivra-youngsharksites.vercel.app/"
+            >motivra-youngsharksites.vercel.app</a
+          >
+        </li>
+        <li>
+          Repository:
+          <a href="https://github.com/Roy-Wanyoike/Motivra"
+            >github.com/Roy-Wanyoike/Motivra</a
+          >
+        </li>
+        <li>
+          Backend deployment posture: see
+          <code>docs/RUNBOOK.md</code> &sect;6 in the repository
+        </li>
+      </ul>
+      <footer>
+        Status page served statically. Backend API traffic is served from the
+        platform&rsquo;s own infrastructure, not from this domain.
+      </footer>
+    </div>
+  </body>
+</html>

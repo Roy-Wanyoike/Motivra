@@ -308,22 +308,33 @@ TLS at the edge, and monitoring attached.
 - All host ports are loopback-bound (#82). Put a reverse proxy (Caddy,
   nginx, or a cloud LB) on the host for TLS termination and forward to
   `127.0.0.1:8081-8084`.
-- The Vercel edge (for the customer app + `/v1/*` API paths) carries HSTS
-  preload and the security-header set; keep `vercel.json` and the proxy
-  headers in sync.
+- The Vercel edge (for the customer web) carries HSTS preload and the
+  security-header set; keep `vercel.json` and the proxy headers in sync.
+  API paths are NOT served from Vercel — clients reach `/v1/*` on the
+  platform's own domain once the backend host is public.
 - Rate limiting lives in the identity service; add edge-level limits
   (per-IP connection/request caps) at the proxy for defense in depth.
 
-### Vercel project configuration (customer web + edge services)
+### Vercel project configuration (customer web + backend posture)
 
 Two Vercel projects build from this repository. Their dashboard settings are
 part of the deployment contract — a wrong toggle here is invisible in git and
-can silently take the product offline (#96).
+can silently take the product offline (#96, #99).
 
 | Project | Builds | Required settings |
 | --- | --- | --- |
 | `motivra` | `apps/customer` (Next.js) | Root Directory `apps/customer`; framework Next.js (auto-detected); install command `npm install` |
-| `motivra-services` | repository root (Dockerfile) | Root Directory repository root; framework Other; container runtime |
+| `motivra-services` | repository root — **static only** | Root Directory repository root; framework Other; serves `index.html` (status page) + `vercel.json` headers |
+
+**The backend has no Vercel presence beyond the status page.** The Go
+services are long-running processes that own their Postgres and NATS
+dependencies; they deploy via the compose stack behind a reverse proxy
+(§6 above), not on Vercel. Do not point API rewrites at Vercel — the
+historical root `vercel.json` carried a non-Vercel `services` schema with
+object destinations that compiled into 500 FUNCTION_INVOCATION_FAILED
+routes on `/healthz`, `/readyz` and `/v1/*` (#99). It is now schema-valid
+(security headers only), and `/` on the services project is a static page
+that redirects humans to the product and documents where the API runs.
 
 **Deployment Protection must be disabled for the production surface.**
 Vercel → Project → Settings → Deployment Protection → *Vercel
