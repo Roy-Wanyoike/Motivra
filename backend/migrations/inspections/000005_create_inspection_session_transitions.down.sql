@@ -1,0 +1,4 @@
+DROP TRIGGER IF EXISTS inspection_session_transitions_append_only ON inspection_session_transitions;
+DROP FUNCTION IF EXISTS prevent_inspection_session_transitions_mutation();
+DROP INDEX IF EXISTS inspection_session_transitions_session_idx;
+DROP TABLE IF EXISTS inspection_session_transitions;
