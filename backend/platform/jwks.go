@@ -121,6 +121,11 @@ type jwksCache struct {
 	url    string
 	client *http.Client
 
+	// minRefresh bounds unknown-kid-triggered refetches (anti-stampede
+	// against forged kid floods); the first (cache-warming) fetch and the
+	// TTL refresh bypass it.
+	minRefresh time.Duration
+
 	mu        sync.Mutex
 	keys      map[string]crypto.PublicKey // kid -> public key
 	fetchedAt time.Time
@@ -132,9 +137,10 @@ type jwksCache struct {
 // newJWKSCache builds a cache over the given JWKS endpoint.
 func newJWKSCache(url string) *jwksCache {
 	return &jwksCache{
-		url:    url,
-		client: &http.Client{Timeout: jwksFetchTimeout},
-		now:    time.Now,
+		url:        url,
+		client:     &http.Client{Timeout: jwksFetchTimeout},
+		minRefresh: jwksMinRefreshGap,
+		now:        time.Now,
 	}
 }
 
@@ -145,11 +151,20 @@ func (c *jwksCache) lookup(kid, alg string) (crypto.PublicKey, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	stale := c.now().Sub(c.fetchedAt) > jwksCacheTTL
-	if _, known := c.keys[kid]; !known || stale {
-		if gap := c.now().Sub(c.lastTry); !stale && gap < jwksMinRefreshGap {
+	now := c.now()
+	_, known := c.keys[kid]
+	if !known {
+		// Unknown kid: refresh, bounded by the anti-stampede gap. The FIRST
+		// fetch (empty cache) bypasses the gap — a verifier must warm up
+		// immediately, and a rotated-in key must be picked up on its first
+		// sighting.
+		if !c.lastTry.IsZero() && now.Sub(c.lastTry) < c.minRefresh {
 			return nil, fmt.Errorf("jwks: unknown kid %q", kid)
 		}
+		c.lastTry = now
+		c.fetchLocked()
+	} else if now.Sub(c.fetchedAt) > jwksCacheTTL {
+		// Known kid but stale set: proactive TTL refresh; serve stale on failure.
 		c.fetchLocked()
 	}
 	key, known := c.keys[kid]
@@ -168,7 +183,6 @@ func (c *jwksCache) lookup(kid, alg string) (crypto.PublicKey, error) {
 // fetchLocked retrieves and swaps the key set. The stale set survives a
 // failed fetch (lastErr records the failure for diagnostics and readyz).
 func (c *jwksCache) fetchLocked() {
-	c.lastTry = c.now()
 	keys, err := fetchJWKS(context.Background(), c.client, c.url)
 	if err != nil {
 		c.lastErr = err
@@ -182,18 +196,27 @@ func (c *jwksCache) fetchLocked() {
 	c.fetchedAt = c.now()
 }
 
-// healthy reports whether the cache holds at least one key fetched without
-// a terminal error. Backs the verifier readyz check.
+// healthy reports whether the key set is trustworthy right now: the most
+// recent fetch succeeded AND yielded at least one usable key. A stale set
+// after a failed refetch keeps serving tokens but reports degraded
+// (readyz red).
 func (c *jwksCache) healthy() bool {
 	if c == nil {
 		return true // no JWKS configured: nothing to be unhealthy about
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.lastErr != nil && len(c.keys) == 0 {
-		return false
+	return c.lastErr == nil && len(c.keys) > 0
+}
+
+// ensure warms the cache: a fetch runs when the set is empty. ReadyCheck
+// uses it so /readyz exercises the endpoint even before the first token.
+func (c *jwksCache) ensure() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.keys) == 0 {
+		c.fetchLocked()
 	}
-	return len(c.keys) > 0
 }
 
 // fetchJWKS retrieves the document at url and converts every supported key.

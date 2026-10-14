@@ -247,20 +247,17 @@ func (i *Issuer) issue(ctx context.Context, store SessionStore, user User, devic
 	}
 
 	expiresAt := now.Add(i.accessTTL)
-	claims := jwt.MapClaims{
-		"iss":       i.issuer,
-		"aud":       i.audience,
-		"sub":       user.ID.String(),
-		"sid":       sessionID.String(),
-		"tenant_id": tenantID,
-		"role":      HighestRole(roles),
-		"roles":     roleStrings(roles),
-		"iat":       now.Unix(),
-		"exp":       expiresAt.Unix(),
-	}
+	claims := platform.AccessClaims(platform.Claims{
+		UserID:    user.ID.String(),
+		TenantID:  tenantID,
+		Role:      HighestRole(roles),
+		SessionID: sessionID.String(),
+		IssuedAt:  now,
+		ExpiresAt: expiresAt,
+	}, roleStrings(roles), i.issuer, i.audience)
 	signed, err := i.sign(claims)
 	if err != nil {
-		return AccessResponse{}, err
+		return AccessResponse{}, fmt.Errorf("sign access token: %w", err)
 	}
 	return AccessResponse{AccessToken: signed, RefreshToken: refreshToken, ExpiresAt: expiresAt}, nil
 }

@@ -119,6 +119,17 @@ func WithJWKSURL(url string) ValidatorOption {
 	return func(v *JWTValidator) { v.jwks = newJWKSCache(url) }
 }
 
+// WithJWKSRefreshGap overrides the anti-stampede gap between unknown-kid
+// refetches (default 1s). Zero is legitimate (test rigs); it only bounds
+// refetches triggered by UNSEEN kids.
+func WithJWKSRefreshGap(d time.Duration) ValidatorOption {
+	return func(v *JWTValidator) {
+		if v.jwks != nil {
+			v.jwks.minRefresh = d
+		}
+	}
+}
+
 // WithPublicKeyPEM adds one static Ed25519/RSA public key (distributed key
 // set) selected by kid. Use when verifiers cannot reach the issuer's JWKS.
 func WithPublicKeyPEM(kid string, pub crypto.PublicKey) ValidatorOption {
@@ -217,12 +228,14 @@ func (v *JWTValidator) HasPrivateKeyMaterial() bool {
 }
 
 // ReadyCheck reports whether every configured key source is usable. It
-// backs the /readyz "jwks" checker of verifier binaries; a validator with
-// no JWKS source is always ready.
+// backs the /readyz "jwks" checker of verifier binaries: the cache is
+// warmed proactively, then the health of the most recent fetch decides. A
+// validator with no JWKS source is always ready.
 func (v *JWTValidator) ReadyCheck(ctx context.Context) error {
 	if v == nil || v.jwks == nil {
 		return nil
 	}
+	v.jwks.ensure()
 	if v.jwks.healthy() {
 		return nil
 	}
