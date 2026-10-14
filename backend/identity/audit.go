@@ -17,6 +17,19 @@ const (
 	ActionSessionRefreshed = "identity.session.refreshed"
 	ActionSessionRevoked   = "identity.session.revoked"
 	ActionRoleGranted      = "identity.role.granted"
+
+	// Password lifecycle (issue #86): the breach-check note is the fail-open
+	// record required when the ADR-0004 breached-password check could not
+	// complete; password_changed covers the authenticated change flow.
+	ActionPasswordChanged        = "identity.user.password_changed"
+	ActionBreachCheckUnavailable = "identity.password.breach_check_unavailable"
+
+	// Verification flow (issue #86): issued fires for every single-use
+	// token created at registration, verified for a consumed token, and
+	// resent for a re-issuance through the resend endpoint.
+	ActionVerificationIssued   = "identity.verification.issued"
+	ActionVerificationVerified = "identity.verification.verified"
+	ActionVerificationResent   = "identity.verification.resent"
 )
 
 // AuditEntry is one append-only audit record (ADR-0003 append-only rules,

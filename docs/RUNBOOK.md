@@ -281,6 +281,14 @@ TLS at the edge, and monitoring attached.
 | `MOTIVRA_OTEL_ENABLED` + `OTEL_EXPORTER_OTLP_ENDPOINT` | `true` + `otel-collector:4317` once the observability stack runs |
 | `MOTIVRA_TRUST_FORWARDED` | `true` only when a reverse proxy fronts the services; otherwise audit IPs and rate-limit keys are spoofable |
 | `MOTIVRA_AUTH_RATE_LIMIT_RPM` | default 60; tune per expected traffic (0 disables — do not) |
+| `MOTIVRA_HIBP_ENABLED` | `true` in production: enables the HIBP k-anonymity breach lookup (only the 5-char SHA-1 prefix leaves the process) on top of the always-on local denylist; default `false`. The local denylist answers even with HIBP off, and a failed lookup fails OPEN with an `identity.password.breach_check_unavailable` audit note unless `MOTIVRA_BREACH_FAIL_CLOSED=true` |
+| `MOTIVRA_BREACH_FAIL_CLOSED` | default `false` (fail-open with audit note); set `true` to refuse registration/password change while the breach check cannot complete |
+| `MOTIVRA_BREACH_DENYLIST_FILE` | optional path to extra denied passwords (one per line, `#` comments); an unreadable file refuses boot |
+| `MOTIVRA_VERIFICATION_GRACE` | default `24h`: window after registration during which an unverified account may still mint/rotate refresh sessions; refresh is refused (403) after it ends until every present channel is verified. `0` disables the gate — do not in production |
+| `MOTIVRA_VERIFICATION_TOKEN_TTL` | default `24h`: validity of single-use verification tokens; keep ≥ the grace window so a token issued at registration outlives it |
+| `MOTIVRA_VERIFICATION_RESEND_COOLDOWN` | default `1m`: minimum spacing between verification tokens per user+channel |
+| `MOTIVRA_VERIFICATION_RESEND_LIMIT` | default `5`: maximum verification tokens per user+channel in a rolling 24h window |
+| `MOTIVRA_VERIFICATION_DEV_ECHO` | MUST stay unset in staging/production (boot refuses it there): echoes raw verification tokens in register/resend responses for provider-less local development |
 
 ### Boot sequence
 

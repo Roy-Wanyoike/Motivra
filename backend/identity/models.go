@@ -39,22 +39,41 @@ const (
 
 // User is an identity account. PasswordHash is the PHC-encoded argon2id
 // string and is never serialized to clients; Profile clears it.
+// EmailVerifiedAt and PhoneVerifiedAt are nil until the corresponding
+// channel has been confirmed through a verification token (issue #86);
+// while any present channel is unverified, session minting is gated to the
+// post-registration grace window (Issuer verification grace).
 type User struct {
-	ID           uuid.UUID
-	Email        string
-	Phone        string // empty when the user has no phone number
-	FullName     string
-	PasswordHash string
-	Status       string
-	Roles        []Role
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID              uuid.UUID
+	Email           string
+	Phone           string // empty when the user has no phone number
+	FullName        string
+	PasswordHash    string
+	Status          string
+	Roles           []Role
+	EmailVerifiedAt *time.Time
+	PhoneVerifiedAt *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// verificationSatisfied reports whether every contact channel the account
+// carries has been verified. Email is mandatory at registration, phone is
+// optional — an account with no phone is fully gated on email alone.
+func (u User) verificationSatisfied() bool {
+	if u.EmailVerifiedAt == nil {
+		return false
+	}
+	if u.Phone != "" && u.PhoneVerifiedAt == nil {
+		return false
+	}
+	return true
 }
 
 // Session is a refresh-token session row. RefreshTokenHash is the hex-encoded
-// SHA-256 digest of the opaque client refresh token; the token itself is
-// never persisted. RevokedAt is non-nil once the session (or its token via
-// rotation) is no longer usable.
+// keyed HMAC-SHA256 digest of the opaque client refresh token; the token
+// itself is never persisted. RevokedAt is non-nil once the session (or its
+// token via rotation) is no longer usable.
 type Session struct {
 	ID                uuid.UUID
 	UserID            uuid.UUID
@@ -71,6 +90,42 @@ type Session struct {
 type RoleGrant struct {
 	Role     Role
 	TenantID *uuid.UUID
+}
+
+// VerificationChannel names the contact channel a verification token
+// proves ownership of (issue #86).
+type VerificationChannel string
+
+// The two verification channels. Email is always present; phone tokens
+// exist only for accounts registered with a phone number.
+const (
+	ChannelEmail VerificationChannel = "email"
+	ChannelPhone VerificationChannel = "phone"
+)
+
+// IsValidVerificationChannel reports whether channel is one of the fixed
+// channel values.
+func IsValidVerificationChannel(channel VerificationChannel) bool {
+	switch channel {
+	case ChannelEmail, ChannelPhone:
+		return true
+	}
+	return false
+}
+
+// VerificationToken is one single-use proof-of-ownership token for a
+// contact channel. TokenHash is the keyed HMAC-SHA256 digest of the opaque
+// client token (the raw token is delivered out-of-band and never
+// persisted). A row is consumed by the first successful verification;
+// expired or consumed rows are rejected indistinguishably.
+type VerificationToken struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	Channel    VerificationChannel
+	TokenHash  string
+	ExpiresAt  time.Time
+	ConsumedAt *time.Time
+	CreatedAt  time.Time
 }
 
 // HighestRole returns the highest-priority role among the given roles using

@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -17,13 +18,15 @@ import (
 // plus the RoleGrantsProvider capability, for white-box tests without a
 // database. Failure injection fields simulate infrastructure faults.
 type fakeStore struct {
-	mu        sync.Mutex
-	users     map[uuid.UUID]User
-	byEmail   map[string]uuid.UUID
-	grants    map[uuid.UUID][]RoleGrant
-	sessions  map[uuid.UUID]Session
-	byRefresh map[string]uuid.UUID
-	audits    []AuditEntry
+	mu                 sync.Mutex
+	users              map[uuid.UUID]User
+	byEmail            map[string]uuid.UUID
+	grants             map[uuid.UUID][]RoleGrant
+	sessions           map[uuid.UUID]Session
+	byRefresh          map[string]uuid.UUID
+	verification       map[uuid.UUID]VerificationToken
+	verificationByHash map[string]uuid.UUID
+	audits             []AuditEntry
 
 	failCreateUser bool
 	failAudit      bool
@@ -32,11 +35,13 @@ type fakeStore struct {
 // newFakeStore returns an empty store ready for use.
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		users:     map[uuid.UUID]User{},
-		byEmail:   map[string]uuid.UUID{},
-		grants:    map[uuid.UUID][]RoleGrant{},
-		sessions:  map[uuid.UUID]Session{},
-		byRefresh: map[string]uuid.UUID{},
+		users:              map[uuid.UUID]User{},
+		byEmail:            map[string]uuid.UUID{},
+		grants:             map[uuid.UUID][]RoleGrant{},
+		sessions:           map[uuid.UUID]Session{},
+		byRefresh:          map[string]uuid.UUID{},
+		verification:       map[uuid.UUID]VerificationToken{},
+		verificationByHash: map[string]uuid.UUID{},
 	}
 }
 
@@ -172,6 +177,120 @@ func (f *fakeStore) InsertAudit(_ context.Context, entry AuditEntry) error {
 	return nil
 }
 
+// UpdatePassword replaces the user's stored password hash.
+func (f *fakeStore) UpdatePassword(_ context.Context, userID uuid.UUID, passwordHash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	u.PasswordHash = passwordHash
+	u.UpdatedAt = time.Now()
+	f.users[userID] = u
+	return nil
+}
+
+// RevokeUserSessions revokes every live session of the user, returning the
+// number of sessions it revoked.
+func (f *fakeStore) RevokeUserSessions(_ context.Context, userID uuid.UUID) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[userID]; !ok {
+		return 0, ErrUserNotFound
+	}
+	revoked := 0
+	now := time.Now()
+	for id, s := range f.sessions {
+		if s.UserID == userID && s.RevokedAt == nil {
+			s.RevokedAt = &now
+			f.sessions[id] = s
+			revoked++
+		}
+	}
+	return revoked, nil
+}
+
+// CreateVerificationToken persists a single-use verification token row.
+func (f *fakeStore) CreateVerificationToken(_ context.Context, t VerificationToken) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[t.UserID]; !ok {
+		return ErrUserNotFound
+	}
+	if _, ok := f.verificationByHash[t.TokenHash]; ok {
+		return platform.ErrConflict("verification token already exists")
+	}
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = time.Now()
+	}
+	f.verification[t.ID] = t
+	f.verificationByHash[t.TokenHash] = t.ID
+	return nil
+}
+
+// GetVerificationTokenByHash returns the token owning the digest.
+func (f *fakeStore) GetVerificationTokenByHash(_ context.Context, hash string) (VerificationToken, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.verificationByHash[hash]
+	if !ok {
+		return VerificationToken{}, ErrUserNotFound
+	}
+	return f.verification[id], nil
+}
+
+// ConsumeVerificationToken atomically marks the token consumed and stamps
+// the user's channel verification timestamp; already-consumed rows conflict.
+func (f *fakeStore) ConsumeVerificationToken(_ context.Context, tokenID, userID uuid.UUID, channel VerificationChannel, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.verification[tokenID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	if t.ConsumedAt != nil {
+		return ErrVerificationTokenConsumed
+	}
+	u, ok := f.users[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	t.ConsumedAt = &at
+	f.verification[tokenID] = t
+	switch channel {
+	case ChannelEmail:
+		u.EmailVerifiedAt = &at
+	case ChannelPhone:
+		u.PhoneVerifiedAt = &at
+	default:
+		return fmt.Errorf("unknown verification channel %q", channel)
+	}
+	u.UpdatedAt = at
+	f.users[userID] = u
+	return nil
+}
+
+// VerificationTokenStats returns the token count created at or after since
+// plus the most recent creation time overall for the user+channel.
+func (f *fakeStore) VerificationTokenStats(_ context.Context, userID uuid.UUID, channel VerificationChannel, since time.Time) (int, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count, latest := 0, time.Time{}
+	for _, t := range f.verification {
+		if t.UserID != userID || t.Channel != channel {
+			continue
+		}
+		if !t.CreatedAt.Before(since) {
+			count++
+		}
+		if t.CreatedAt.After(latest) {
+			latest = t.CreatedAt
+		}
+	}
+	return count, latest, nil
+}
+
 // ListUsers returns a newest-first page of users with roles loaded.
 func (f *fakeStore) ListUsers(_ context.Context, limit, offset int) ([]User, error) {
 	f.mu.Lock()
@@ -227,6 +346,48 @@ func (f *fakeStore) ageAbsoluteSession(id uuid.UUID) {
 	s := f.sessions[id]
 	s.AbsoluteExpiresAt = time.Now().Add(-time.Minute)
 	f.sessions[id] = s
+}
+
+// ageUser backdates the account's creation so the verification grace window
+// measured from CreatedAt has (or has not) ended — the boundary control for
+// the issue #86 refresh gate.
+func (f *fakeStore) ageUser(id uuid.UUID, createdAt time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u := f.users[id]
+	u.CreatedAt = createdAt
+	f.users[id] = u
+}
+
+// expireVerificationToken forces a verification token's expiry into the
+// past (the TTL-boundary scenario of issue #86).
+func (f *fakeStore) expireVerificationToken(id uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.verification[id]
+	t.ExpiresAt = time.Now().Add(-time.Minute)
+	f.verification[id] = t
+}
+
+// backdateVerificationToken moves a verification token's creation (and the
+// cooldown reference) into the past without expiring it.
+func (f *fakeStore) backdateVerificationToken(id uuid.UUID, createdAt time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.verification[id]
+	t.CreatedAt = createdAt
+	f.verification[id] = t
+}
+
+// verificationTokens returns every stored verification token (test probe).
+func (f *fakeStore) verificationTokens() []VerificationToken {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]VerificationToken, 0, len(f.verification))
+	for _, t := range f.verification {
+		out = append(out, t)
+	}
+	return out
 }
 
 // auditsByAction returns the recorded entries with the given action.

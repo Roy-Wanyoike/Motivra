@@ -14,7 +14,7 @@ import (
 
 // identityTables are every table of the identity chain, truncated between
 // tests so each starts from a clean schema.
-var identityTables = []string{"audit_log", "sessions", "user_roles", "users"}
+var identityTables = []string{"audit_log", "verification_tokens", "sessions", "user_roles", "users"}
 
 // integrationPool connects to the Postgres instance named by
 // TEST_DATABASE_URL through the shared pgtest harness (issue #28, deferral
@@ -207,4 +207,104 @@ func countAudit(t *testing.T, store *PostgresStore, action string) int {
 	var n int
 	require.NoError(t, store.pool.QueryRow(t.Context(), `SELECT count(*) FROM audit_log WHERE action = $1`, action).Scan(&n))
 	return n
+}
+
+// TestPostgresStoreVerificationFlow exercises the verification flow against
+// real PostgreSQL: token persistence (digest only), single-use consumption
+// with the channel timestamp, expiry, resend cooldown, the grace-window
+// refresh gate on both sides of the boundary, and the password-change
+// session sweep. Gated on TEST_DATABASE_URL like the other suites.
+func TestPostgresStoreVerificationFlow(t *testing.T) {
+	validator, svc, store := integrationPool(t)
+	ctx := t.Context()
+
+	registered, err := svc.Register(ctx, "verifyflow@example.com", "+254700000015", "integration-pass", "Verify Flow", "ci-runner", "127.0.0.1")
+	require.NoError(t, err)
+	user, err := store.GetUserByEmail(ctx, "verifyflow@example.com")
+	require.NoError(t, err)
+	require.Nil(t, user.EmailVerifiedAt)
+	require.Nil(t, user.PhoneVerifiedAt)
+	require.Equal(t, 2, countAudit(t, store, ActionVerificationIssued), "registration issued one token per present channel: email + phone")
+
+	// Store stats see the registration token for the email channel only.
+	count, latest, err := store.VerificationTokenStats(ctx, user.ID, ChannelEmail, time.Now().Add(-verificationResendLimitWindow))
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.False(t, latest.IsZero())
+	// The phone channel's latest issuance is the registration phone token
+	// (the user registered with a phone); `latest` is unfiltered by the
+	// since window by contract.
+	_, latestPhone, err := store.VerificationTokenStats(ctx, user.ID, ChannelPhone, time.Now())
+	require.NoError(t, err)
+	require.False(t, latestPhone.IsZero(), "the registration phone token is the latest phone-channel issuance")
+
+	// Immediate resend trips the cooldown at the database level.
+	_, _, err = svc.ResendVerification(ctx, "verifyflow@example.com", ChannelEmail)
+	require.Equal(t, 429, appErr(t, err).Status)
+
+	// Issue a fresh token through the service and consume it: single use,
+	// channel stamped, audited.
+	raw, _, err := svc.issueVerificationToken(ctx, user, ChannelEmail, "resend")
+	require.NoError(t, err)
+	require.Equal(t, 1, countAudit(t, store, ActionVerificationResent))
+	channel, err := svc.Verify(ctx, raw)
+	require.NoError(t, err)
+	require.Equal(t, ChannelEmail, channel)
+	verified, err := store.GetUserByEmail(ctx, "verifyflow@example.com")
+	require.NoError(t, err)
+	require.NotNil(t, verified.EmailVerifiedAt)
+
+	// Replay is rejected by the conditional UPDATE, not just the service.
+	_, err = svc.Verify(ctx, raw)
+	requireUnauthorized(t, err)
+
+	// Expiry: an aged-out token is rejected and stamps nothing.
+	rawExpired, _, err := svc.issueVerificationToken(ctx, verified, ChannelEmail, "resend")
+	require.NoError(t, err)
+	_, err = store.pool.Exec(ctx, `UPDATE verification_tokens SET expires_at = now() - interval '1 minute' WHERE token_hash = $1`,
+		svc.issuer.TokenHash(rawExpired))
+	require.NoError(t, err)
+	_, err = svc.Verify(ctx, rawExpired)
+	requireUnauthorized(t, err)
+
+	// Grace gate, both sides of the boundary: backdate creation past the
+	// default 24h window, refresh refuses; the verification timestamp lifts
+	// the gate without a new session.
+	_, err = store.pool.Exec(ctx, `UPDATE users SET created_at = now() - interval '25 hours' WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+	_, err = svc.RefreshTokens(ctx, registered.RefreshToken)
+	require.Equal(t, 403, appErr(t, err).Status, "unverified-past-grace refresh is refused")
+	_, err = svc.Login(ctx, "verifyflow@example.com", "integration-pass", "", "")
+	require.Equal(t, 403, appErr(t, err).Status, "unverified-past-grace login is refused")
+	claims, err := validator.Validate(registered.AccessToken)
+	require.NoError(t, err)
+	require.Equal(t, user.ID.String(), claims.UserID, "the access token itself still validates during the window boundary test")
+
+	// Phone verification completes the account (registration phone token).
+	phoneUser, err := store.GetUserByEmail(ctx, "verifyflow@example.com")
+	require.NoError(t, err)
+	require.False(t, phoneUser.verificationSatisfied(), "email verified, phone still pending")
+	rawPhone, _, err := svc.issueVerificationToken(ctx, phoneUser, ChannelPhone, "resend")
+	require.NoError(t, err)
+	_, err = svc.Verify(ctx, rawPhone)
+	require.NoError(t, err)
+	fullyVerified, err := store.GetUserByEmail(ctx, "verifyflow@example.com")
+	require.NoError(t, err)
+	require.True(t, fullyVerified.verificationSatisfied())
+	require.Equal(t, 2, countAudit(t, store, ActionVerificationVerified), "one verified event per consumed token")
+
+	// Password change: breach-unchecked here (no breacher wired), but the
+	// hash update + full session sweep + audit are exercised end-to-end.
+	require.NoError(t, svc.ChangePassword(ctx, user.ID, "integration-pass", "rotated-pass-77"))
+	_, err = svc.RefreshTokens(ctx, registered.RefreshToken)
+	requireUnauthorized(t, err, "the password change revoked the pre-change session")
+	require.Equal(t, 1, countAudit(t, store, ActionPasswordChanged))
+	relaunched, err := svc.Login(ctx, "verifyflow@example.com", "rotated-pass-77", "ci-runner-3", "127.0.0.3")
+	require.NoError(t, err)
+	_, err = validator.Validate(relaunched.AccessToken)
+	require.NoError(t, err)
+	_, err = svc.Login(ctx, "verifyflow@example.com", "integration-pass", "", "")
+	requireUnauthorized(t, err, "the old password no longer authenticates")
+
+	truncateAll(t, store)
 }
