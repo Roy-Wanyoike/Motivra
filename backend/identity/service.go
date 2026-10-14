@@ -107,7 +107,7 @@ func (s *Service) Register(ctx context.Context, email, phone, password, fullName
 	}
 	if err := s.audit(ctx, user.ID, ActionUserRegistered, "user", user.ID.String(), map[string]any{
 		"email":       user.Email,
-		"device_name": deviceName,
+		"device_name": platform.RedactFreeText(deviceName),
 		"ip_address":  ip,
 	}); err != nil {
 		return AccessResponse{}, err
@@ -153,7 +153,7 @@ func (s *Service) Login(ctx context.Context, email, password, deviceName, ip str
 		return AccessResponse{}, err
 	}
 	if err := s.audit(ctx, user.ID, ActionUserLogin, "user", user.ID.String(), map[string]any{
-		"device_name": deviceName,
+		"device_name": platform.RedactFreeText(deviceName),
 		"ip_address":  ip,
 	}); err != nil {
 		return AccessResponse{}, err
@@ -170,7 +170,7 @@ func (s *Service) RefreshTokens(ctx context.Context, refreshToken string) (Acces
 		return AccessResponse{}, err
 	}
 	if err := s.audit(ctx, previous.UserID, ActionSessionRefreshed, "session", previous.ID.String(), map[string]any{
-		"device_name": previous.DeviceName,
+		"device_name": platform.RedactFreeText(previous.DeviceName),
 		"ip_address":  previous.IPAddress,
 	}); err != nil {
 		return AccessResponse{}, err

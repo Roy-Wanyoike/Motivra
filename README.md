@@ -223,7 +223,7 @@ Between waves, the project runs **integration windows**: feature development pau
 | Intelligence | `/backend/ai` | Triage, copilot, predictions — advisory outputs only |
 | Platform ops | `/infrastructure`, `/observability` | Helm, Argo CD, SLOs, dashboards, runbooks |
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), the [architecture overview](docs/ARCHITECTURE.md) and the [glossary](docs/GLOSSARY.md) — one shared vocabulary for every team.
+See [CONTRIBUTING.md](CONTRIBUTING.md), the [architecture overview](docs/ARCHITECTURE.md), the [glossary](docs/GLOSSARY.md) — one shared vocabulary for every team — and, for operating the system, the [runbook](docs/RUNBOOK.md) (deploy, monitoring, backup/DR, incident response) with the [PII handling policy](docs/PII-HANDLING.md).
 
 ### Target repository layout
 
@@ -241,7 +241,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), the [architecture overview](docs/ARCHITE
 /contracts/          # OpenAPI, protobuf, event schemas
 /infrastructure/     # Docker, Helm, OpenTofu, Argo CD
 /observability/      # Dashboards, alerts, SLOs, runbooks
-/docs/               # Architecture, ADRs, roadmap, glossary, engineering
+/docs/               # Architecture, ADRs, roadmap, glossary, runbook, PII policy
 ```
 
 ## Roadmap
