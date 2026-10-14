@@ -6,10 +6,7 @@ full conflict-resolution protocol of
 [issue #55](https://github.com/Roy-Wanyoike/Motivra/issues/55): the offline outbox,
 the three-way-merge sync reconciler with 409-driven intent re-basing, pure job-state
 guards mirroring `contracts/jobs`, and the first two screens wired through a tiny typed
-navigation context.
-
-Owned by the Motivra Tech owner; see `docs/ARCHITECTURE.md` §2 — do not edit outside
-this zone.
+navigation context. See `docs/ARCHITECTURE.md` §2 for the context boundaries.
 
 ## Why this exists
 

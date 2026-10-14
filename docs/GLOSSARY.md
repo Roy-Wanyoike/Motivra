@@ -1,6 +1,6 @@
 # Motivra Business Domain Glossary
 
-One vocabulary across every team, agent and document. Definitions here win arguments.
+One vocabulary across every team and document. Definitions here win arguments.
 
 ## People & organizations
 

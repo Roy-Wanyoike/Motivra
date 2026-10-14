@@ -66,8 +66,7 @@ touching money (integer minor-unit ledger) rank highest.
 - **If a secret is leaked (committed, posted, or exposed): rotate it
   immediately** — revoke/replace first, then clean history if feasible, then
   document the incident in a (non-sensitive) issue. Assume any leaked token
-  is compromised from the moment of exposure; for the GitHub PAT used during
-  the founding phase, rotation was already flagged as an owner action.
+  is compromised from the moment of exposure.
 - **Local storage guidance:** keep secrets out of sync/backups where
   possible; use OS keychains or an encrypted store rather than plaintext
   files when practical; scope tokens to the minimum needed and expiry-bound
@@ -109,6 +108,5 @@ boundary section) and
 - GitHub Actions is currently disabled account-wide (billing lock, tracked in
   issue #10); **local quality gates are the interim merge gate**, and `main`
   is protected by a ruleset requiring PRs and forbidding force-push/deletion.
-- Dependabot alerts and secret scanning: enablement is handled by the
-  coordinator via API/UI; status is recorded in the security PR and QA
-  report.
+- Dependabot alerts and secret scanning are enabled at the repository level;
+  findings are triaged as standard issues.

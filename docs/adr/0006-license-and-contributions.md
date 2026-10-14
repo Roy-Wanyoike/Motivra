@@ -13,7 +13,7 @@ The repository is public from day one, and issue #7 requires the licensing and c
 2. **Commercial platform ambitions are real.** The roadmap names a 7-stream revenue model, and investor expectations include defensibility. But investors in this class of business underwrite the data network effect and execution speed, not code secrecy in a repo that is already public.
 3. **Africa-first market entry depends on trust and integrator reach.** Fleet operators, insurers, garage partners and eventually M-Pesa-scale integrators must be able to build on the platform without legal review friction; a permissive, patent-clear license lowers that barrier.
 4. **Recruiter and community optics matter.** A visible OSS posture with clean, lightweight governance (a LICENSE file, an ADR trail, a sign-off flow instead of legal paperwork) attracts senior engineers who self-select out of heavyweight CLA processes.
-5. **The team is small and mostly autonomous agents.** Any intake process requiring manual legal review per PR would throttle the build. The intake mechanism must be automatable and enforceable at commit time.
+5. **The team is small and works asynchronously.** Any intake process requiring manual legal review per PR would throttle the build. The intake mechanism must be automatable and enforceable at commit time.
 
 ## Decision
 

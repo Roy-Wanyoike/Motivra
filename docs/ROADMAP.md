@@ -78,4 +78,4 @@ Waves sequence the build. Between waves, integration windows pause feature work 
 
 - GitOps deployment (Argo CD), canary + rollback drills, runbooks, incident process
 - **Exit criteria:** the first real customer job completes the full loop in production — request, dispatch, repair, approval, payment, recorded lifecycle
-- **Status (window 2):** deployment baseline landed early — service Dockerfile, full compose stack (PostGIS/Redis/NATS), `.env.example`, runbook, idempotent demo seed (PR #34); release-readiness QA report with honest verdict and gate list (PR #37); secrets/dependency automation enabled. GitOps, canary, and SLO enforcement remain open.
+- **Status (window 2):** deployment baseline landed early — service Dockerfile, full compose stack (PostGIS/Redis/NATS), `.env.example`, runbook, idempotent demo seed (PR #34); security review and release-readiness gates recorded (PR #37); secrets/dependency automation enabled. GitOps, canary, and SLO enforcement remain open.

@@ -2,10 +2,7 @@
 
 Service requests, the job state machine (18 statuses, CREATED through
 COMPLETED plus CANCELLED/FAILED/ESCALATED) and technician assignments.
-The jobs domain engineer owns this zone.
-
-Owned by the jobs domain owner; see docs/ARCHITECTURE.md §2 — do not edit
-outside your zone.
+See docs/ARCHITECTURE.md §2 for the context boundaries.
 
 ## Job state machine
 

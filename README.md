@@ -115,7 +115,7 @@ This repository was bootstrapped in **September 2026**. It is at the very beginn
 
 ## For engineers
 
-This repository is built as a coordinated multi-agent engineering organization — principal engineers, SREs, security, QA, data and AI specialists working in bounded contexts through issues, contracts and reviewed PRs. If you are evaluating this codebase as a signal of engineering culture, the culture is the point: [the rules we build by](#engineering-principles) are enforced in templates, CI and review — not aspirational wall art.
+The build runs like a disciplined engineering organization — platform, security, domain and client specialists working in bounded contexts through issues, contracts and reviewed PRs. If you are evaluating this codebase as a signal of engineering culture, the culture is the point: [the rules we build by](#engineering-principles) are enforced in templates, CI and review — not aspirational wall art.
 
 ### The stack — and why each piece earns its place
 
@@ -199,7 +199,7 @@ flowchart LR
 
 ```text
 Issue (typed: feature / bug / architecture / infra / security / docs / tech-debt / spike)
-  → Branch (agent/<domain>/<topic> — one owner per branch)
+  → Branch (<domain>/<topic> — one owner per branch)
   → Implementation + tests (unit, integration, contract, E2E)
   → PR (template-enforced: impact, security, rollback, observability)
   → CI quality gates (build, lint, tests, security scan, migration validation, coverage)

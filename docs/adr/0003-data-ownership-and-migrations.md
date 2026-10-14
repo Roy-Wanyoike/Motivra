@@ -7,7 +7,7 @@
 
 ## Context
 
-Motivra's domain model has an unusually high density of integrity-critical rules: vehicle history is append-only, the payments ledger is authoritative and must never be mutable, tenant isolation is a security boundary, and evidence provenance must survive audits. At the same time, the build is executed by many agents and engineers in parallel, all committing to one repository (ADR-0001).
+Motivra's domain model has an unusually high density of integrity-critical rules: vehicle history is append-only, the payments ledger is authoritative and must never be mutable, tenant isolation is a security boundary, and evidence provenance must survive audits. At the same time, the build is executed by many engineers working in parallel, all committing to one repository (ADR-0001).
 
 The central tension: one shared PostgreSQL cluster is the pragmatic choice at 0→1 (one backup story, one connection topology, transactional outbox for ADR-0002), but a shared database is the classic way bounded contexts erode — first a cross-domain `JOIN`, then a shared table, then nobody can change anything without a negotiation.
 
@@ -60,7 +60,7 @@ Rules:
 
 ## Alternatives considered
 
-**Single shared migration chain** (`/backend/migrations/` flat, one global sequence). Rejected: it is a high-risk shared resource under a multi-agent build — every PR touching schema conflicts textually at the head revision, sequential global numbering serializes merges, and ownership of any table becomes ambiguous exactly where the domain model demands the opposite. Rejected even though it is operationally simpler for a single-tenant database: the per-domain directory mapping gives the same outcome (one cluster, ordered per-domain chains) without the collision surface.
+**Single shared migration chain** (`/backend/migrations/` flat, one global sequence). Rejected: it is a high-risk shared resource under a parallel build — every PR touching schema conflicts textually at the head revision, sequential global numbering serializes merges, and ownership of any table becomes ambiguous exactly where the domain model demands the opposite. Rejected even though it is operationally simpler for a single-tenant database: the per-domain directory mapping gives the same outcome (one cluster, ordered per-domain chains) without the collision surface.
 
 **Database-per-context (separate clusters or schemas with separate connection planes).** The strongest isolation — cross-domain access becomes impossible rather than forbidden. Rejected for now: it multiplies backup/restore, observability, migration tooling and transactional-outbox complexity at the stage when the team is smallest. The per-domain DB-role rule keeps the exit door open; revisit if a domain's load profile (e.g. analytics ingestion) or compliance posture diverges enough to justify it.
 
@@ -73,7 +73,7 @@ Rules:
 **Positive**
 
 - Schema changes are reviewable, attributable, and owned: any migration file's path names its owner, and CI validates its pair and reversibility.
-- Parallel agents work without colliding — the migration chains are disjoint by construction.
+- Parallel work streams without colliding — the migration chains are disjoint by construction.
 - The source-of-truth hierarchy (PostgreSQL authoritative; Redis/OpenSearch/ClickHouse rebuildable derivations) makes disaster recovery tractable: restore Postgres, replay streams, rebuild the rest.
 - DB-role partitioning turns cross-domain table access from a policy violation into a runtime error — self-enforcing, testable in integration tests (with ADR-0004 tenant-isolation tests).
 

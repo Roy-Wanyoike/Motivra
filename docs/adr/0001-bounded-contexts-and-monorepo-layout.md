@@ -7,7 +7,7 @@
 
 ## Context
 
-Motivra is a multi-surface platform: nine product surfaces (Drive, Tech, Inspect, Garage, Fleet, Dealer, Command, Intelligence, Developer) run on one shared backbone of vehicle identity, history, dispatch and money. The build is executed by a distributed, partially agent-based engineering organization working in parallel waves. Both facts create the same risk: without explicit, mechanically discoverable boundaries, parallel work collides — shared files conflict, one team's schema change breaks another team's service, and ownership becomes an oral tradition instead of a review gate.
+Motivra is a multi-surface platform: nine product surfaces (Drive, Tech, Inspect, Garage, Fleet, Dealer, Command, Intelligence, Developer) run on one shared backbone of vehicle identity, history, dispatch and money. The build is executed by a distributed engineering organization working in parallel waves. Both facts create the same risk: without explicit, mechanically discoverable boundaries, parallel work collides — shared files conflict, one team's schema change breaks another team's service, and ownership becomes an oral tradition instead of a review gate.
 
 The stack decisions are already made at the platform level (Go backend, PostgreSQL+PostGIS, NATS JetStream, Temporal, Next.js web, React Native mobile — see `README.md`). What is not yet decided:
 
@@ -15,7 +15,7 @@ The stack decisions are already made at the platform level (Go backend, PostgreS
 2. How the domain model from `docs/ARCHITECTURE.md` §2 maps to directories and services.
 3. How ownership of tables, events and workflows is made visible in the repository layout itself.
 
-Constraints: the team is small at 0→1 but the domain model is wide (13+ backend contexts); CI must stay fast enough to gate every PR; agents and humans alike need file-level ownership rules that a reviewer (or a coordinator script) can check mechanically.
+Constraints: the team is small at 0→1 but the domain model is wide (13+ backend contexts); CI must stay fast enough to gate every PR; contributors need file-level ownership rules that a reviewer can check mechanically.
 
 ## Decision
 
@@ -68,7 +68,7 @@ A deployable unit is `cmd/<service>`. In Wave 1 most contexts deploy as one serv
 
 **Per-service Go modules / polyrepo.** Each context gets its own module (`github.com/Roy-Wanyoike/Motivra/identity` as `go.mod` root) or its own repository. Rejected for this stage: duplicate tooling and CI plumbing multiplied by 13+ contexts is the dominant cost at 0→1; cross-context contract changes become multi-PR dances with ordering hazards; shared platform code needs a publish/consume cycle. Revisit triggers: more than ~10 independently deployable services with separate teams, CI wall-time on full builds becoming a bottleneck for everyone, or diverging release cadences. The directory mapping survives that split — a context can be lifted out because it never reached into its neighbours.
 
-**Single-package application.** One `/backend` package tree organized by technical layer (`/handlers`, `/models`, `/repos`). Rejected: boundary erosion is guaranteed. In a layer-organized codebase, any file can import any other file, domain invariants (append-only history, ledger authority, tenant scoping) cannot be located, and agent/human ownership cannot be assigned per directory. The costs show up as review latency and defect escapes rather than as a one-time design expense.
+**Single-package application.** One `/backend` package tree organized by technical layer (`/handlers`, `/models`, `/repos`). Rejected: boundary erosion is guaranteed. In a layer-organized codebase, any file can import any other file, domain invariants (append-only history, ledger authority, tenant scoping) cannot be located, and ownership cannot be assigned per directory. The costs show up as review latency and defect escapes rather than as a one-time design expense.
 
 **Microservices from day one.** A service per bounded context with independent deployment pipelines from the start. Rejected as premature: operational surface (13 pipelines, 13 dashboards, distributed tracing required just to debug a happy path) outruns the team's ability to operate it, while the domain is still moving. The modular monorepo keeps the extraction option open — bounded contexts are the unit of future extraction either way.
 
@@ -76,7 +76,7 @@ A deployable unit is `cmd/<service>`. In Wave 1 most contexts deploy as one serv
 
 **Positive**
 
-- The ownership zone of every agent and engineer is a directory path — mechanically checkable in review, and the basis for the agent registry (`docs/engineering/agents.md`).
+- The ownership zone of every engineer is a directory path — mechanically checkable in review.
 - Cross-context changes are visible and reviewable in one PR when they must be atomic.
 - `platform` becomes the enforced choke point for cross-cutting concerns (middleware, JWT validation, OTel wiring), so every service inherits them by construction (ADR-0004, ADR-0005).
 - New contexts follow a fixed recipe: directory, migration chain, `cmd/<service>`, contracts — the service-template path Wave 1 requires.
@@ -85,5 +85,5 @@ A deployable unit is `cmd/<service>`. In Wave 1 most contexts deploy as one serv
 
 - CI builds and tests everything on every PR; per-context affected-path optimization is deferred work, not cancelled work.
 - The single module means a careless `import` can cross a boundary silently; reviewers and lint conventions must catch what the compiler does not. A import-boundary lint is expected in Wave 1 platform work.
-- Monorepo-scale hygiene (branch discipline, one owner per branch) is a coordination requirement, handled through the agent registry and conflict protocol rather than tooling.
+- Monorepo-scale hygiene (branch discipline, one owner per branch) is a coordination requirement, handled through review conventions and the conflict protocol rather than tooling.
 - Splitting a context later requires untangling its shared-`platform` dependency graph; keeping `platform` small and stable is the mitigation.

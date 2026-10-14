@@ -128,7 +128,7 @@ export interface MergeDecision {
 /**
  * Three-way merge of one pulled job: (base / client-intent / server-state).
  *
- * Rules (build directive + ARCHITECTURE.md §6/§7 — enforced by tests in
+ * Rules (ARCHITECTURE.md §6/§7 — enforced by tests in
  * tests/sync.conflict.test.ts, not aspirational):
  *
  *  - **Server-authoritative fields** (never taken from the client):
