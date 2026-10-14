@@ -1,0 +1,815 @@
+openapi: 3.0.3
+info:
+  title: Motivra Payments API
+  version: 1.0.0
+  description: |
+    The payments foundation (issue #62, Wave 5 A17): payment intents,
+    settlement transactions, full refunds, the provider webhook receiver and
+    the reconciliation trigger.
+
+    Money discipline: every amount is an INTEGER count of KES minor units
+    (cents) end-to-end — `amount_minor` is never a float, never zero, never
+    negative, and the currency is pinned to KES. There is no rounding
+    anywhere in the domain; the Daraja adapter additionally refuses amounts
+    that are not whole KES (M-Pesa carries no cents) instead of truncating.
+
+    Lifecycle: an intent is CREATED when initiated and moves PROCESSING once
+    the provider accepts the initiation (a PENDING transaction exists); a
+    verified webhook or the reconciliation query fallback settles it
+    SUCCEEDED or FAILED exactly once. CREATED can also move to CANCELED.
+    SUCCEEDED, FAILED and CANCELED are terminal — a retried payment is a NEW
+    intent. Transactions move PENDING -> SUCCEEDED | FAILED exactly once and
+    are append-only afterwards (database-enforced). Refunds are full refunds
+    of SUCCEEDED intents: REQUESTED -> COMPLETED | FAILED, at most one
+    completed/in-flight refund per intent. Every intent status move lands in
+    an append-only transition audit log.
+
+    Webhooks: deliveries are HMAC-SHA256 signed per provider over
+    "<timestamp>.<raw body>" and carry the signature in the
+    X-Motivra-Payments-Signature header. Verification is constant-time,
+    freshness-bounded and fail-closed; it precedes any parsing. The same
+    payload replayed N times applies exactly once — replays answer
+    `{"status": "duplicate"}`. Provider-attested amounts must equal the
+    attempted amount exactly or the delivery is rejected. This endpoint is
+    NOT behind the JWT bearer scheme: the caller is a payment provider and
+    the signature is the trust boundary.
+
+    Reconciliation: POST /reconcile runs one bounded batch that queries the
+    provider about every PROCESSING intent whose newest transaction has been
+    PENDING past the staleness window, applying the same exactly-once
+    settlement the webhook path uses — missed webhooks converge.
+
+    Reads are tenant-scoped from the verified access token (never client
+    input): organizational principals see their tenant's payments, personal
+    principals see the payments they created or that concern them as the
+    payer (customer_id), ADMIN/SUPER_ADMIN read across tenants. Invisible and
+    unknown resources both answer 404. Money movement requires a
+    money-mover role (GARAGE, DISPATCHER, ADMIN, SUPER_ADMIN); CUSTOMER and
+    TECHNICIAN never initiate or refund payments.
+
+    Domain events publish on JetStream as `motivra.payments.<aggregate>.<event>.v1`:
+    `intent.created.v1`, `transaction.succeeded.v1`, `transaction.failed.v1`,
+    `refund.completed.v1`, `refund.failed.v1`.
+
+    All endpoints except the webhook receiver require a Bearer access token
+    issued by the identity service (HS256). Errors are RFC 7807-style
+    `application/problem+json`.
+servers:
+  - url: /
+tags:
+  - name: intents
+    description: Payment intent lifecycle, settlement attempts and refunds
+  - name: webhooks
+    description: Provider callback receiver (signature-verified)
+  - name: operations
+    description: Operator triggers (reconciliation)
+security:
+  - bearerAuth: []
+paths:
+  /v1/payments/intents:
+    post:
+      operationId: initiatePayment
+      summary: Initiate a payment intent
+      description: |
+        Creates the intent in `CREATED`, calls the selected provider and
+        records the outcome: an accepted initiation persists a PENDING
+        transaction, moves the intent to `PROCESSING` and answers 201.
+        A deterministic provider rejection persists a FAILED transaction,
+        moves the intent to `FAILED` and answers 422 (the ledger keeps the
+        honest attempt). An unreachable provider answers 503 leaving the
+        intent `CREATED` with no transaction row — retryable, never recorded
+        as a payment failure.
+
+        The tenant and creator come from the token claims — never the body.
+        `payer_phone` is used transiently by STK-push providers and is never
+        persisted (PII minimization). `provider` selects the adapter; empty
+        selects the service default (`sandbox` unless the deployment
+        configured Daraja). Publishes `intent.created.v1` (plus
+        `transaction.failed.v1` on deterministic rejection).
+      tags: [intents]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitiatePaymentInput'
+      responses:
+        '201':
+          description: Intent created and the initiation attempted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitiatedPayment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: The payment provider was unreachable; the intent stays CREATED (retryable).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      operationId: listPaymentIntents
+      summary: List payment intents (tenant-scoped)
+      description: |
+        One offset page of the scoped intent registry, newest first. The
+        scope comes from the verified token claims: tenant principals see
+        their tenant's intents, personal principals see intents they created
+        or that concern them as the payer, operators see everything.
+      tags: [intents]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/IntentStatus'
+        - name: customer_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: job_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: vehicle_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: The scoped intent page (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentIntent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/payments/intents/{intentID}:
+    get:
+      operationId: getPaymentIntent
+      summary: Fetch one payment intent (tenant-scoped)
+      description: Intent the scope cannot see reads as missing (404).
+      tags: [intents]
+      parameters:
+        - $ref: '#/components/parameters/IntentID'
+      responses:
+        '200':
+          description: The intent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/payments/intents/{intentID}/transactions:
+    get:
+      operationId: listPaymentTransactions
+      summary: List an intent's settlement attempts (tenant-scoped)
+      description: |
+        The intent's transactions, oldest first — one row per provider
+        attempt, including the synchronous rejections. The intent must be
+        visible to the scope or the answer is 404.
+      tags: [intents]
+      parameters:
+        - $ref: '#/components/parameters/IntentID'
+      responses:
+        '200':
+          description: The transaction log (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Transaction'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/payments/transactions/{transactionID}:
+    get:
+      operationId: getPaymentTransaction
+      summary: Fetch one settlement attempt (tenant-scoped)
+      description: Transaction of an invisible intent reads as missing (404).
+      tags: [intents]
+      parameters:
+        - $ref: '#/components/parameters/TransactionID'
+      responses:
+        '200':
+          description: The transaction.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/payments/intents/{intentID}/refund:
+    post:
+      operationId: refundPayment
+      summary: Request a full refund of a succeeded intent
+      description: |
+        Full refund first (issue #62): refuses intents in any other state
+        than `SUCCEEDED` (409) and intents that already carry a completed or
+        in-flight refund (409). The refund row is persisted REQUESTED before
+        the provider is called, so a provider outage leaves an honest
+        REQUESTED row (503) rather than nothing — ops reviews it and a retry
+        is refused until the row resolves. Publishes `refund.completed.v1`
+        or `refund.failed.v1`.
+      tags: [intents]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IntentID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundInput'
+      responses:
+        '201':
+          description: Refund recorded (COMPLETED, or REQUESTED when the provider is asynchronous/unreachable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Refund'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: The provider was unreachable; the refund stays REQUESTED for ops review.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/payments/refunds/{refundID}:
+    get:
+      operationId: getPaymentRefund
+      summary: Fetch one refund (tenant-scoped)
+      description: Refund of an invisible intent reads as missing (404).
+      tags: [intents]
+      parameters:
+        - $ref: '#/components/parameters/RefundID'
+      responses:
+        '200':
+          description: The refund.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Refund'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/payments/webhooks/{provider}:
+    post:
+      operationId: receivePaymentWebhook
+      summary: Provider webhook receiver (signature-verified, no JWT)
+      description: |
+        The provider callback endpoint. NOT behind the bearer scheme: the
+        HMAC signature in `X-Motivra-Payments-Signature`
+        (`t=<unix>,v1=<hex>` over `<timestamp>.<raw body>` with the
+        per-provider shared secret) is the trust boundary, verified
+        fail-closed BEFORE the body is parsed. The provider-attested amount
+        must equal the attempted amount exactly.
+
+        The delivery applies exactly once: the first delivery settles the
+        transaction (`{"status": "applied"}`), every replay of the same
+        payload is absorbed by the idempotency key (`{"status":
+        "duplicate"}`). A replay carrying a DIFFERENT payload under the same
+        key is rejected (tamper evidence). Verified events drive the same
+        state transitions the reconciliation query path applies.
+      tags: [webhooks]
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [sandbox, daraja]
+          description: The provider adapter the delivery is addressed to.
+        - name: X-Motivra-Payments-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+            example: 't=1735732800,v1=5256a7e0f3b1c2d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/SandboxWebhookBody'
+                - $ref: '#/components/schemas/DarajaCallbackBody'
+      responses:
+        '200':
+          description: Delivery processed (applied or duplicate).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResult'
+        '401':
+          description: Signature missing, malformed, stale or mismatching (fail-closed).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: The provider in the path is not configured.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Another delivery of this payload is currently in flight.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Body exceeds the size cap.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Payload authenticated but rejected (unknown event, foreign provider, amount mismatch, no matching transaction).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/payments/reconcile:
+    post:
+      operationId: runPaymentReconciliation
+      summary: Run one reconciliation batch (operator roles)
+      description: |
+        The provider-query fallback that repairs missed webhooks: scans the
+        PROCESSING intents whose newest transaction has been PENDING past
+        the staleness window, queries each provider and applies the same
+        exactly-once settlement the webhook path uses. Converges regardless
+        of which path lands first. Operator roles (ADMIN, SUPER_ADMIN) only;
+        the service also runs this on the MOTIVRA_PAYMENTS_RECONCILE_INTERVAL
+        ticker.
+      tags: [operations]
+      responses:
+        '200':
+          description: The batch result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconcileResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  parameters:
+    IntentID:
+      name: intentID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TransactionID:
+      name: transactionID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RefundID:
+      name: refundID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+  responses:
+    Unauthorized:
+      description: Missing, invalid or expired access token (or, on webhooks, a failed signature verification).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Authenticated but the role is not allowed for this operation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource does not exist or is outside the caller's scope.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: State conflict (illegal state-machine move, duplicate refund, in-flight delivery).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Request body or query parameters are invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Unexpected server failure; no internals are leaked.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    IntentStatus:
+      type: string
+      enum:
+        - CREATED
+        - PROCESSING
+        - SUCCEEDED
+        - FAILED
+        - CANCELED
+      description: |
+        The intent lifecycle: CREATED -> PROCESSING -> SUCCEEDED | FAILED,
+        with CREATED -> CANCELED before any provider round-trip. Terminal
+        statuses are immutable — a retried payment is a NEW intent.
+    TransactionStatus:
+      type: string
+      enum: [PENDING, SUCCEEDED, FAILED]
+      description: |
+        One settlement attempt: PENDING until the provider settles it
+        (exactly once, via webhook or reconciliation), FAILED when the
+        provider rejected it synchronously.
+    RefundStatus:
+      type: string
+      enum: [REQUESTED, COMPLETED, FAILED]
+      description: |
+        Full-refund lifecycle: REQUESTED -> COMPLETED | FAILED exactly once;
+        rows are append-only afterwards.
+    InitiatePaymentInput:
+      type: object
+      required: [amount_minor, currency]
+      properties:
+        amount_minor:
+          type: integer
+          format: int64
+          description: Integer KES minor units (cents). Strictly positive; never a float. Daraja additionally requires divisibility by 100 (whole KES).
+          example: 150000
+        currency:
+          type: string
+          enum: [KES]
+          description: Only KES is settled in this domain.
+        provider:
+          type: string
+          enum: [sandbox, daraja]
+          description: The adapter to settle through; empty selects the service default.
+        customer_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The paying user's id; the payer's read path.
+        job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Cross-domain reference to the originating job (no FK).
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Cross-domain reference to the vehicle (no FK).
+        description:
+          type: string
+          maxLength: 200
+          description: Payer-facing memo. Redacted free text — pasted emails/phones never reach the ledger raw.
+        payer_phone:
+          type: string
+          description: |
+            The payer's MSISDN for STK push (Daraja). Used transiently at
+            initiation time and NEVER persisted (PII minimization).
+    InitiatedPayment:
+      type: object
+      properties:
+        intent:
+          $ref: '#/components/schemas/PaymentIntent'
+        transaction:
+          $ref: '#/components/schemas/Transaction'
+          description: The PENDING (or synchronously FAILED) attempt; absent when the provider was unreachable.
+    PaymentIntent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+          nullable: true
+        customer_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_by:
+          type: string
+          format: uuid
+          description: The staff principal that initiated the payment (from the token, never the body).
+        amount_minor:
+          type: integer
+          format: int64
+          description: Integer KES minor units; immutable after creation.
+        currency:
+          type: string
+          enum: [KES]
+        status:
+          $ref: '#/components/schemas/IntentStatus'
+        provider:
+          type: string
+          description: The adapter settling this intent (sandbox, daraja).
+        provider_ref:
+          type: string
+          description: The provider-side reference returned by the initiation; the handle callbacks and queries correlate by.
+        job_id:
+          type: string
+          format: uuid
+          nullable: true
+        vehicle_id:
+          type: string
+          format: uuid
+          nullable: true
+        description:
+          type: string
+        failure_reason:
+          type: string
+        succeeded_at:
+          type: string
+          format: date-time
+          nullable: true
+        failed_at:
+          type: string
+          format: date-time
+          nullable: true
+        canceled_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        intent_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+        provider_ref:
+          type: string
+          description: The provider's transaction reference (e.g. the M-Pesa CheckoutRequestID).
+        provider_receipt:
+          type: string
+          description: The provider's settlement identifier (e.g. the M-Pesa MpesaReceiptNumber), stamped exactly once with the outcome.
+        status:
+          $ref: '#/components/schemas/TransactionStatus'
+        amount_minor:
+          type: integer
+          format: int64
+        currency:
+          type: string
+          enum: [KES]
+        failure_reason:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: The provider-attested completion time (bounded future skew), null until terminal.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RefundInput:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 500
+          description: Short operator memo.
+    Refund:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        intent_id:
+          type: string
+          format: uuid
+        amount_minor:
+          type: integer
+          format: int64
+          description: Always the full settled amount (partial refunds are a later wave).
+        currency:
+          type: string
+          enum: [KES]
+        status:
+          $ref: '#/components/schemas/RefundStatus'
+        provider:
+          type: string
+        provider_ref:
+          type: string
+          description: The provider-side refund reference when completed.
+        reason:
+          type: string
+        failure_reason:
+          type: string
+        requested_by:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    WebhookResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [applied, duplicate]
+          description: applied = this delivery settled the transaction; duplicate = an earlier delivery already did (exactly-once).
+        duplicate:
+          type: boolean
+        intent_id:
+          type: string
+          format: uuid
+        transaction_id:
+          type: string
+          format: uuid
+    SandboxWebhookBody:
+      type: object
+      required: [event, provider, provider_ref, amount_minor, currency, occurred_at]
+      description: The normalized sandbox webhook envelope (signed with the sandbox secret).
+      properties:
+        event:
+          type: string
+          enum: [transaction.succeeded, transaction.failed]
+        provider:
+          type: string
+          enum: [sandbox]
+        provider_ref:
+          type: string
+        provider_receipt:
+          type: string
+          description: Optional settlement receipt; when absent the ledger keeps the receipt it holds.
+        amount_minor:
+          type: integer
+          format: int64
+        currency:
+          type: string
+          enum: [KES]
+        failure_reason:
+          type: string
+          description: Required on transaction.failed; forbidden on transaction.succeeded.
+        occurred_at:
+          type: string
+          format: date-time
+          description: Bounded future skew is refused.
+    DarajaCallbackBody:
+      type: object
+      description: The M-Pesa Daraja STK callback wire format, translated by the daraja adapter (which requires the ingress HMAC signature — Daraja signs nothing itself).
+      properties:
+        Body:
+          type: object
+          properties:
+            stkCallback:
+              type: object
+              properties:
+                MerchantRequestID:
+                  type: string
+                CheckoutRequestID:
+                  type: string
+                ResultCode:
+                  type: integer
+                  description: 0 = success; anything else is a failure carrying ResultDesc.
+                ResultDesc:
+                  type: string
+                CallbackMetadata:
+                  type: object
+                  description: Present on success; carries Amount and MpesaReceiptNumber. PhoneNumber is deliberately dropped (PII minimization).
+                  properties:
+                    Item:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          Name:
+                            type: string
+                          Value:
+                            description: JSON value (number or string depending on the item).
+    ReconcileResult:
+      type: object
+      properties:
+        scanned:
+          type: integer
+          description: Stale intents the run examined.
+        repaired:
+          type: integer
+          description: Transactions settled by this run (the convergence metric — a missed webhook repaired by the query fallback).
+        still_pending:
+          type: integer
+          description: Transactions the provider has not settled yet.
+        errors:
+          type: integer
+          description: Provider/store failures inside the run (each run continues past individual failures).
+    Error:
+      type: object
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        errors:
+          type: array
+          description: Field-level validation issues when present.
+          items:
+            type: object
