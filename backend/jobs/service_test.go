@@ -64,15 +64,36 @@ func (f *fakeStore) GetRequest(_ context.Context, id uuid.UUID, scope ReadScope)
 	return r, nil
 }
 
-// requestVisible mirrors the PostgresStore scope predicate for requests.
+// requestVisible mirrors the PostgresStore scope predicate for requests:
+// operators span the platform, tenant scopes match only their tenant's rows
+// (migration 000006), personal scopes match their own, and the zero scope
+// fails closed.
 func requestVisible(r ServiceRequest, scope ReadScope) bool {
-	return scope.Operator || r.CustomerID == scope.ViewerID
+	switch {
+	case scope.Operator:
+		return true
+	case scope.TenantID != nil:
+		return r.TenantID != nil && *r.TenantID == *scope.TenantID
+	case scope.ViewerID != uuid.Nil:
+		return r.CustomerID == scope.ViewerID
+	default:
+		return false
+	}
 }
 
 // jobVisible mirrors the PostgresStore scope predicate for jobs.
 func jobVisible(j Job, scope ReadScope) bool {
-	return scope.Operator || j.CustomerID == scope.ViewerID ||
-		(j.TechnicianID != nil && *j.TechnicianID == scope.ViewerID)
+	switch {
+	case scope.Operator:
+		return true
+	case scope.TenantID != nil:
+		return j.TenantID != nil && *j.TenantID == *scope.TenantID
+	case scope.ViewerID != uuid.Nil:
+		return j.CustomerID == scope.ViewerID ||
+			(j.TechnicianID != nil && *j.TechnicianID == scope.ViewerID)
+	default:
+		return false
+	}
 }
 
 func (f *fakeStore) CreateJob(_ context.Context, j *Job) error {
@@ -115,7 +136,8 @@ func (f *fakeStore) UpdateJobStatus(_ context.Context, jobID uuid.UUID, newStatu
 		return fmt.Errorf("jobs: update job status %s: %w", jobID, ErrJobNotFound)
 	}
 	f.transitions = append(f.transitions, JobTransition{
-		ID: int64(len(f.transitions) + 1), JobID: jobID, FromStatus: j.Status, ToStatus: newStatus,
+		ID: int64(len(f.transitions) + 1), JobID: jobID, TenantID: j.TenantID,
+		FromStatus: j.Status, ToStatus: newStatus,
 		ActorID: actorID, Reason: reason, CreatedAt: f.stamp(),
 	})
 	j.Status = newStatus
@@ -137,11 +159,12 @@ func (f *fakeStore) AssignTechnician(_ context.Context, jobID uuid.UUID, technic
 		}
 	}
 	f.assignments[uuid.New()] = JobAssignment{
-		JobID: jobID, TechnicianID: technicianID, AssignedBy: assignedBy,
+		JobID: jobID, TenantID: j.TenantID, TechnicianID: technicianID, AssignedBy: assignedBy,
 		Status: AssignmentStatusAssigned, CreatedAt: f.stamp(),
 	}
 	f.transitions = append(f.transitions, JobTransition{
-		ID: int64(len(f.transitions) + 1), JobID: jobID, FromStatus: j.Status, ToStatus: StatusAssigned,
+		ID: int64(len(f.transitions) + 1), JobID: jobID, TenantID: j.TenantID,
+		FromStatus: j.Status, ToStatus: StatusAssigned,
 		ActorID: assignedBy, Reason: "technician assigned", CreatedAt: f.stamp(),
 	})
 	j.Status = StatusAssigned
@@ -171,7 +194,8 @@ func (f *fakeStore) AcceptAssignment(_ context.Context, jobID uuid.UUID, technic
 		return fmt.Errorf("jobs: accept assignment: no open assignment of job %s to technician %s", jobID, technicianID)
 	}
 	f.transitions = append(f.transitions, JobTransition{
-		ID: int64(len(f.transitions) + 1), JobID: jobID, FromStatus: j.Status, ToStatus: StatusAccepted,
+		ID: int64(len(f.transitions) + 1), JobID: jobID, TenantID: j.TenantID,
+		FromStatus: j.Status, ToStatus: StatusAccepted,
 		ActorID: &technicianID, Reason: "technician accepted assignment", CreatedAt: f.stamp(),
 	})
 	j.Status = StatusAccepted
@@ -281,6 +305,10 @@ func opScope() ReadScope { return ReadScope{ViewerID: uuid.New(), Operator: true
 
 // viewScope returns the non-operator read scope of a single viewer.
 func viewScope(id uuid.UUID) ReadScope { return ReadScope{ViewerID: id} }
+
+// tenantScope returns an organizational read scope bound to one tenant
+// (the tenant_id claims land with jobs migration 000006, issue #88).
+func tenantScope(tenantID uuid.UUID) ReadScope { return ReadScope{TenantID: &tenantID} }
 
 func sampleRequest() *ServiceRequest {
 	return &ServiceRequest{

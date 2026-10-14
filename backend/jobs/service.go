@@ -114,7 +114,7 @@ func (s *Service) CreateRequest(ctx context.Context, r *ServiceRequest) error {
 		return fmt.Errorf("jobs: create request: %w", err)
 	}
 
-	return s.publish(ctx, EventRequestReceived, r.ID, &r.CustomerID, RequestReceivedPayload{
+	return s.publish(ctx, EventRequestReceived, r.ID, &r.CustomerID, tenantString(r.TenantID), RequestReceivedPayload{
 		RequestID:   r.ID,
 		CustomerID:  r.CustomerID,
 		VehicleID:   r.VehicleID,
@@ -139,6 +139,7 @@ func (s *Service) CreateJobFromRequest(ctx context.Context, requestID uuid.UUID,
 
 	job := Job{
 		ServiceRequestID: &request.ID,
+		TenantID:         request.TenantID,
 		CustomerID:       request.CustomerID,
 		VehicleID:        request.VehicleID,
 		Status:           StatusCreated,
@@ -151,7 +152,7 @@ func (s *Service) CreateJobFromRequest(ctx context.Context, requestID uuid.UUID,
 		return Job{}, fmt.Errorf("jobs: create job from request: %w", err)
 	}
 
-	if err := s.publish(ctx, EventJobCreated, job.ID, &scope.ViewerID, JobCreatedPayload{
+	if err := s.publish(ctx, EventJobCreated, job.ID, &scope.ViewerID, tenantString(job.TenantID), JobCreatedPayload{
 		JobID:            job.ID,
 		ServiceRequestID: job.ServiceRequestID,
 		CustomerID:       job.CustomerID,
@@ -180,7 +181,7 @@ func (s *Service) Transition(ctx context.Context, jobID uuid.UUID, to Status, ac
 		return fmt.Errorf("jobs: transition job: %w", err)
 	}
 
-	return s.publish(ctx, EventJobStatusChanged, jobID, actorID, JobStatusChangedPayload{
+	return s.publish(ctx, EventJobStatusChanged, jobID, actorID, tenantString(job.TenantID), JobStatusChangedPayload{
 		JobID:   jobID,
 		From:    job.Status,
 		To:      to,
@@ -224,7 +225,7 @@ func (s *Service) AssignTechnician(ctx context.Context, jobID uuid.UUID, technic
 		return fmt.Errorf("jobs: assign technician: %w", err)
 	}
 
-	return s.publish(ctx, EventJobAssigned, jobID, assignedBy, JobAssignedPayload{
+	return s.publish(ctx, EventJobAssigned, jobID, assignedBy, tenantString(job.TenantID), JobAssignedPayload{
 		JobID:        jobID,
 		TechnicianID: technicianID,
 		AssignedBy:   assignedBy,
@@ -251,7 +252,7 @@ func (s *Service) Accept(ctx context.Context, jobID uuid.UUID, technicianID uuid
 		return fmt.Errorf("jobs: accept assignment: %w", err)
 	}
 
-	return s.publish(ctx, EventJobStatusChanged, jobID, &technicianID, JobStatusChangedPayload{
+	return s.publish(ctx, EventJobStatusChanged, jobID, &technicianID, tenantString(job.TenantID), JobStatusChangedPayload{
 		JobID:   jobID,
 		From:    job.Status,
 		To:      StatusAccepted,
@@ -309,10 +310,11 @@ func correlationFromContext(ctx context.Context) string {
 // publish sends one domain event on the jobs domain. It is a no-op when no
 // publisher is configured. Publishing failures surface to the caller:
 // events are part of the domain contract, not best-effort logging. The
-// envelope carries the acting principal (empty for system actors) and the
-// request correlation id; tenant_id stays empty until the jobs tables
-// carry tenant_id (documented in #28: data-model milestone).
-func (s *Service) publish(ctx context.Context, eventType string, aggregateID uuid.UUID, actorID *uuid.UUID, payload any) error {
+// envelope carries the acting principal (empty for system actors), the
+// request correlation id and the owning tenant (empty for personal
+// principals' rows — the tenancy columns landed with jobs migration
+// 000006, issue #88, completing the deferral documented in #28).
+func (s *Service) publish(ctx context.Context, eventType string, aggregateID uuid.UUID, actorID *uuid.UUID, tenantID string, payload any) error {
 	if s.publisher == nil {
 		return nil
 	}
@@ -320,7 +322,7 @@ func (s *Service) publish(ctx context.Context, eventType string, aggregateID uui
 	if actorID != nil && *actorID != uuid.Nil {
 		actor = actorID.String()
 	}
-	e, err := platform.NewEvent(eventType, aggregateID.String(), "", actor, correlationFromContext(ctx), payload)
+	e, err := platform.NewEvent(eventType, aggregateID.String(), tenantID, actor, correlationFromContext(ctx), payload)
 	if err != nil {
 		return fmt.Errorf("jobs: build %s event: %w", eventType, err)
 	}
@@ -328,6 +330,14 @@ func (s *Service) publish(ctx context.Context, eventType string, aggregateID uui
 		return fmt.Errorf("jobs: publish %s: %w", eventType, err)
 	}
 	return nil
+}
+
+// tenantString renders the optional tenant for the event envelope.
+func tenantString(t *uuid.UUID) string {
+	if t == nil {
+		return ""
+	}
+	return t.String()
 }
 
 // LocationValid reports whether the coordinate pair is present and within

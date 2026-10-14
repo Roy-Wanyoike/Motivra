@@ -25,7 +25,10 @@ const (
 // be built from a request: CreateJobFromRequest flips the status from
 // RequestStatusReceived to RequestStatusConverted.
 type ServiceRequest struct {
-	ID          uuid.UUID
+	ID uuid.UUID
+	// TenantID is the owning organization when the creator acted under a
+	// tenant claim (jobs migration 000006); nil for personal principals.
+	TenantID    *uuid.UUID
 	CustomerID  uuid.UUID
 	VehicleID   *uuid.UUID
 	Description string
@@ -49,8 +52,11 @@ type Job struct {
 	// ServiceRequestID links back to the originating request; nil for
 	// jobs created without one (e.g. imported historical jobs).
 	ServiceRequestID *uuid.UUID
-	CustomerID       uuid.UUID
-	VehicleID        *uuid.UUID
+	// TenantID is the owning organization (inherited from the originating
+	// service request); nil for personal principals' jobs.
+	TenantID   *uuid.UUID
+	CustomerID uuid.UUID
+	VehicleID  *uuid.UUID
 	// Status is one of the Status* constants on the state machine.
 	Status         Status
 	ProblemSummary string
@@ -62,8 +68,11 @@ type Job struct {
 // JobAssignment records one dispatch attempt of a job to a technician.
 // Reassignment appends a new row; the latest row per job is the live one.
 type JobAssignment struct {
-	ID           uuid.UUID
-	JobID        uuid.UUID
+	ID    uuid.UUID
+	JobID uuid.UUID
+	// TenantID denormalizes the parent job's tenant (stamped inside the
+	// assignment transaction); nil for personal principals' jobs.
+	TenantID     *uuid.UUID
 	TechnicianID uuid.UUID
 	// AssignedBy is the dispatcher (or system actor) that issued the
 	// assignment; nil when assigned by automation.
@@ -78,8 +87,11 @@ type JobAssignment struct {
 // JobTransition is one row of the append-only job_transitions audit log.
 // Rows are never updated or deleted.
 type JobTransition struct {
-	ID         int64
-	JobID      uuid.UUID
+	ID    int64
+	JobID uuid.UUID
+	// TenantID denormalizes the parent job's tenant (stamped inside the
+	// transition transaction); nil for personal principals' jobs.
+	TenantID   *uuid.UUID
 	FromStatus Status
 	ToStatus   Status
 	ActorID    *uuid.UUID

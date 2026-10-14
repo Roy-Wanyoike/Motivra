@@ -95,8 +95,11 @@ type assignmentRequest struct {
 
 // readScope derives the caller's ReadScope from the validated access token
 // in the request context — never from any client-supplied field. The viewer
-// is the token subject; platform-operator roles (dispatchRoles) read across
-// resources. ok is false when no usable authenticated principal is present.
+// is the token subject; a tenant claim (when present) scopes an
+// organizational principal to its organization's rows; platform-operator
+// roles (dispatchRoles) read across resources. A malformed tenant or
+// subject claim is an authentication failure (fail closed). ok is false
+// when no usable authenticated principal is present.
 func readScope(r *http.Request) (scope ReadScope, ok bool) {
 	claims, present := platform.ClaimsFromContext(r.Context())
 	if !present {
@@ -106,7 +109,15 @@ func readScope(r *http.Request) (scope ReadScope, ok bool) {
 	if err != nil {
 		return ReadScope{}, false
 	}
-	return ReadScope{ViewerID: viewer, Operator: IsOperatorRole(claims.Role)}, true
+	scope = ReadScope{ViewerID: viewer, Operator: IsOperatorRole(claims.Role)}
+	if claims.TenantID != "" {
+		tenantID, parseErr := uuid.Parse(claims.TenantID)
+		if parseErr != nil {
+			return ReadScope{}, false
+		}
+		scope.TenantID = &tenantID
+	}
+	return scope, true
 }
 
 // requestResponse is the wire form of a service request.
@@ -148,7 +159,9 @@ type transitionResponse struct {
 }
 
 // handleCreateRequest implements POST /v1/requests. The authenticated user
-// becomes the customer.
+// becomes the customer; a tenant claim (when present) stamps the row's
+// tenant_id — the tenancy column the read scopes derive isolation from
+// (jobs migration 000006, issue #88).
 func (s *Service) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	claims, ok := platform.ClaimsFromContext(r.Context())
 	if !ok {
@@ -159,6 +172,15 @@ func (s *Service) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		platform.WriteError(w, platform.ErrUnauthorized("authenticated subject is not a user identifier"))
 		return
+	}
+	var tenantID *uuid.UUID
+	if claims.TenantID != "" {
+		tenant, parseErr := uuid.Parse(claims.TenantID)
+		if parseErr != nil {
+			platform.WriteError(w, platform.ErrUnauthorized("authenticated tenant claim is not a tenant identifier"))
+			return
+		}
+		tenantID = &tenant
 	}
 	req, err := platform.DecodeJSON[createRequestRequest](r, maxRequestBytes)
 	if err != nil {
@@ -178,6 +200,7 @@ func (s *Service) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sr := &ServiceRequest{
+		TenantID:    tenantID,
 		CustomerID:  customerID,
 		VehicleID:   req.VehicleID,
 		Description: req.Description,
