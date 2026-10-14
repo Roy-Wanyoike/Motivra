@@ -306,6 +306,44 @@ TLS at the edge, and monitoring attached.
 - Rate limiting lives in the identity service; add edge-level limits
   (per-IP connection/request caps) at the proxy for defense in depth.
 
+### Vercel project configuration (customer web + edge services)
+
+Two Vercel projects build from this repository. Their dashboard settings are
+part of the deployment contract — a wrong toggle here is invisible in git and
+can silently take the product offline (#96).
+
+| Project | Builds | Required settings |
+| --- | --- | --- |
+| `motivra` | `apps/customer` (Next.js) | Root Directory `apps/customer`; framework Next.js (auto-detected); install command `npm install` |
+| `motivra-services` | repository root (Dockerfile) | Root Directory repository root; framework Other; container runtime |
+
+**Deployment Protection must be disabled for the production surface.**
+Vercel → Project → Settings → Deployment Protection → *Vercel
+Authentication*: **Disabled** (optionally keep it enabled for *preview
+deployments only*). With authentication enabled, every request — including
+the production alias — 302-redirects to `vercel.com/sso-api`, so the public
+sees a Vercel login page or "page unavailable" instead of the app. This is
+the exact failure mode behind #96 and it produces **no build error and no
+commit-status failure**; it can only be caught by probing the public URL.
+
+Environment variables (project `motivra`): `NEXT_PUBLIC_API_BASE_URL` is
+optional while the customer app runs standalone — empty means same-origin,
+which is correct once the `/v1/*` rewrites to the services deployment are
+active. Set it to the services base URL only when that URL is publicly
+reachable (or a protection-bypass secret is configured), otherwise API
+calls fail behind the same SSO wall.
+
+Post-deploy verification (run from a clean session, no Vercel cookies):
+
+```sh
+# 1) No SSO redirect — expect HTTP 200 and cache HIT/MISS, never 302 to vercel.com/sso-api
+curl -sI https://motivra-youngsharksites.vercel.app/ | head -1
+# 2) Landing content actually renders (static prerender — no function involved)
+curl -s https://motivra-youngsharksites.vercel.app/ | grep -o "<title>[^<]*</title>"
+# 3) Key routes exist
+curl -s -o /dev/null -w "%{http_code}\n" https://motivra-youngsharksites.vercel.app/login
+```
+
 ### Known deployment posture
 
 One shared Postgres cluster (ADR-0003) with per-domain migration chains;
