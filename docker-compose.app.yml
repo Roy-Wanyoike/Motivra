@@ -29,10 +29,11 @@ services:
     # the geospatial substrate").
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-motivra}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — generate with: openssl rand -base64 24}
+      # Generate a password with: openssl rand -base64 24
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
       POSTGRES_DB: ${POSTGRES_DB:-motivra}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -41,6 +42,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -50,7 +59,7 @@ services:
     # Cache / rate-limit / ephemeral coordination only — never a source of
     # truth (ADR-0003 hard rule 1).
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -58,6 +67,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -68,8 +85,8 @@ services:
     # GET /healthz for the container healthcheck.
     command: "-js -m 8222"
     ports:
-      - "4223:4222"
-      - "8223:8222"
+      - "127.0.0.1:4223:4222"
+      - "127.0.0.1:8223:8222"
     volumes:
       - nats-data:/data
     healthcheck:
@@ -77,6 +94,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -94,10 +119,10 @@ services:
       MOTIVRA_APP_NAME: identity
       MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
       MOTIVRA_PORT: "8080"
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
+      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -107,7 +132,15 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -123,10 +156,10 @@ services:
       MOTIVRA_APP_NAME: vehicles
       MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
       MOTIVRA_PORT: "8080"
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
+      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -136,7 +169,15 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8082:8080"
+      - "127.0.0.1:8082:8080"
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -152,10 +193,10 @@ services:
       MOTIVRA_APP_NAME: jobs
       MOTIVRA_ENV: ${MOTIVRA_ENV:-development}
       MOTIVRA_PORT: "8080"
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
+      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
@@ -165,7 +206,15 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8083:8080"
+      - "127.0.0.1:8083:8080"
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
@@ -184,17 +233,25 @@ services:
       # Dispatch is stateless (no database client), but platform.Config.
       # Validate() requires MOTIVRA_DATABASE_URL outside the test env —
       # the value is present-but-unused for this service.
-      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
+      MOTIVRA_DATABASE_URL: postgres://${POSTGRES_USER:-motivra}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/${POSTGRES_DB:-motivra}?sslmode=disable
       MOTIVRA_REDIS_URL: redis://redis:6379/0
       MOTIVRA_NATS_URL: nats://nats:4222
-      MOTIVRA_JWT_SECRET: ${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env — generate with: openssl rand -base64 48}
+      MOTIVRA_JWT_SECRET: "${MOTIVRA_JWT_SECRET:?set MOTIVRA_JWT_SECRET in .env (openssl rand -base64 48)}"
       MOTIVRA_JWT_ISSUER: ${MOTIVRA_JWT_ISSUER:-motivra-identity}
       MOTIVRA_JWT_AUDIENCE: ${MOTIVRA_JWT_AUDIENCE:-motivra}
       MOTIVRA_SHUTDOWN_TIMEOUT: ${MOTIVRA_SHUTDOWN_TIMEOUT:-15s}
       MOTIVRA_OTEL_ENABLED: ${MOTIVRA_OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
-      - "8084:8080"
+      - "127.0.0.1:8084:8080"
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - motivra
