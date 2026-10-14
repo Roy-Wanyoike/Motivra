@@ -1,7 +1,6 @@
 # CODEOWNERS — Motivra
-# Single-owner phase (issue #27): every path resolves to @Roy-Wanyoike.
-# Expand per-zone as agents/teams join; keep one path per line, `path owner` syntax.
-# Reviewed by: docs-spec-01 (docs/spec/ zone).
+# Single-owner phase: every path resolves to @Roy-Wanyoike.
+# Expand per-zone as teams form; keep one path per line, `path owner` syntax.
 
 # Default: everything not matched below
 * @Roy-Wanyoike
@@ -16,7 +15,7 @@
 # Client applications
 /apps/ @Roy-Wanyoike
 
-# Binding architecture decisions (override the spec where they diverge — see docs/spec/README.md)
+# Binding architecture decisions
 /docs/adr/ @Roy-Wanyoike
 
 # API/event contracts

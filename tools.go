@@ -1,7 +1,7 @@
 //go:build tools
 
 // tools.go pins the shared Motivra dependency set in go.mod so that domain
-// agents never need to edit dependency versions. This file is never compiled
+// services never need to edit dependency versions. This file is never compiled
 // into any binary (build tag `tools`); its blank imports exist only to keep
 // the shared requirements in go.mod when `go mod tidy` runs.
 //

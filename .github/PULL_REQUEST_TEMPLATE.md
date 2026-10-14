@@ -1,6 +1,5 @@
 <!--
 PRs that do not fill every section below will be sent back.
-Source of truth: the Motivra build directive, "PR REQUIREMENTS".
 -->
 
 ## Problem

@@ -19,7 +19,7 @@ Ideas under consideration, ranked by leverage. Status: `considered â†’ specced â
 
 ## Deliberately not on the list
 
-- Customer subscriptions before recurring value is proven (per the build directive).
+- Customer subscriptions before recurring value is proven.
 - Any growth mechanic that could be read as spam (referral abuse, dark patterns).
 - AI features that bypass human-confirmed diagnosis or touch the ledger.
 

@@ -1,13 +1,13 @@
 # Backend — Dispatch
 
-Technician availability, service areas and explainable dispatch scoring (fit, distance, equipment, performance). The dispatch engineer owns this zone; see docs/ARCHITECTURE.md §2 — do not edit outside your zone.
+Technician availability, service areas and explainable dispatch scoring (fit, distance, equipment, performance). See docs/ARCHITECTURE.md §2 for the context boundaries.
 
 This directory currently contains the **dispatch scoring engine** (issue #19): `scoring.go` (the engine), `http.go` (the HTTP API) and their tests. The service boots from `cmd/dispatch`.
 
 ## Philosophy
 
 - **Never nearest-only.** Proximity is one weighted factor among six. A nearby but unqualified technician must never outrank a slightly farther, fully qualified one. The ranking test in `scoring_test.go` pins this.
-- **Explainable by construction.** Every factor carries a weight, a raw metric, a normalized 0-1 value and a human-readable reason that names its inputs ("matches 2/2 required skills (engine, brakes); rated on Toyota"). There are no hidden multipliers: anything that moves a score is a named factor, and `GET /v1/dispatch/factors` publishes the full catalogue. The directive requires that a dispatcher can always ask "why this technician?" and get an answer.
+- **Explainable by construction.** Every factor carries a weight, a raw metric, a normalized 0-1 value and a human-readable reason that names its inputs ("matches 2/2 required skills (engine, brakes); rated on Toyota"). There are no hidden multipliers: anything that moves a score is a named factor, and `GET /v1/dispatch/factors` publishes the full catalogue. a dispatcher can always ask "why this technician?" and get an answer.
 - **Advisory, not autonomous.** The engine recommends an ordering. It never assigns, reassigns or cancels a job. Decisions (and their audit trail) land with the jobs integration.
 - **Pure function.** No database, no broker, no clock, no randomness. The service is stateless; all inputs arrive in the request.
 

@@ -1,6 +1,6 @@
 # Backend — Vehicle Identity
 
-Vehicle registry, VIN resolution, the Vehicle Passport and the append-only service history. The vehicles domain engineer owns this zone; see docs/ARCHITECTURE.md §2 — do not edit outside your zone.
+Vehicle registry, VIN resolution, the Vehicle Passport and the append-only service history. See docs/ARCHITECTURE.md §2 for the context boundaries.
 
 ## Responsibilities
 

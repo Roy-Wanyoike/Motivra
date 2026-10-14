@@ -1,10 +1,7 @@
 # Backend — Identity & Security
 
 Authentication, RBAC roles, refresh sessions and the append-only audit trail
-for Motivra. The identity/security engineer owns this zone; see
-`docs/ARCHITECTURE.md` §2 and ADR-0004 (security baseline).
-
-Owned by the identity/security owner; do not edit outside your zone.
+for Motivra. See `docs/ARCHITECTURE.md` §2 and ADR-0004 (security baseline).
 
 ## Responsibilities
 

@@ -25,7 +25,7 @@ export interface OutboxDeps {
 /**
  * Offline-first mutation outbox.
  *
- * ## Idempotency contract (directive: outbox + idempotency rules)
+ * ## Idempotency contract
  *
  * 1. **Enqueue-time dedupe** — `enqueue` with an idempotency key that already
  *    maps to a live (non-FAILED) operation returns that operation with

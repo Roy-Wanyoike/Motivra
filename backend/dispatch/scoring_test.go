@@ -419,7 +419,7 @@ func TestScoreIsNilSafeOnEmptyCandidates(t *testing.T) {
 }
 
 func TestRealisticRankingNeverNearestOnly(t *testing.T) {
-	// The directive: never nearest-only. A nearby but unqualified
+	// Design rule: never nearest-only. A nearby but unqualified
 	// technician must not outrank a slightly farther, fully qualified one.
 	j := jobFixture()
 	nearButWrong := candidateFixture("11111111-1111-4111-8111-111111111111")
