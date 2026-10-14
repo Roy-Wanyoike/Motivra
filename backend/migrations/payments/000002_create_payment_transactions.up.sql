@@ -10,6 +10,7 @@ CREATE TABLE payment_transactions (
     intent_id      uuid NOT NULL REFERENCES payment_intents(id) ON DELETE CASCADE,
     provider       text NOT NULL,
     provider_ref   text NULL,
+    provider_receipt text NULL,
     status         text NOT NULL CHECK (status IN ('PENDING','SUCCEEDED','FAILED')),
     amount_minor   bigint NOT NULL CHECK (amount_minor > 0),
     currency       text   NOT NULL CHECK (currency = 'KES'),
@@ -24,6 +25,12 @@ CREATE TABLE payment_transactions (
 CREATE UNIQUE INDEX payment_transactions_provider_ref_idx
     ON payment_transactions (provider, provider_ref)
     WHERE provider_ref IS NOT NULL AND provider_ref <> '';
+
+-- The receipt is the provider's own settlement identifier (e.g. the M-Pesa
+-- MpesaReceiptNumber); it is stamped exactly once, with the outcome.
+CREATE UNIQUE INDEX payment_transactions_provider_receipt_idx
+    ON payment_transactions (provider, provider_receipt)
+    WHERE provider_receipt IS NOT NULL AND provider_receipt <> '';
 
 CREATE INDEX payment_transactions_intent_idx ON payment_transactions (intent_id, created_at);
 

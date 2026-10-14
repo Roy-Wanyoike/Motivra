@@ -73,12 +73,16 @@ type Transaction struct {
 	IntentID uuid.UUID
 	Provider string
 	// ProviderRef is the provider's transaction reference (e.g. the M-Pesa
-	// MpesaReceiptNumber). Immutable after creation.
-	ProviderRef   string
-	Status        TransactionStatus
-	AmountMinor   int64
-	Currency      string
-	FailureReason string
+	// CheckoutRequestID) — the handle callbacks and queries correlate by.
+	// Immutable after creation.
+	ProviderRef string
+	// ProviderReceipt is the provider's settlement identifier (e.g. the
+	// M-Pesa MpesaReceiptNumber), stamped exactly once with the outcome.
+	ProviderReceipt string
+	Status          TransactionStatus
+	AmountMinor     int64
+	Currency        string
+	FailureReason   string
 	// OccurredAt is the provider-attested completion time (validated
 	// external input, bounded future skew), nil until terminal.
 	OccurredAt *time.Time
