@@ -324,17 +324,24 @@ can silently take the product offline (#96, #99).
 | Project | Builds | Required settings |
 | --- | --- | --- |
 | `motivra` | `apps/customer` (Next.js) | Root Directory `apps/customer`; framework Next.js (auto-detected); install command `npm install` |
-| `motivra-services` | repository root — **static only** | Root Directory repository root; framework Other; serves `index.html` (status page) + `vercel.json` headers |
+| `motivra-services` | repository root (Dockerfile) | Root Directory repository root; framework Other; container build driven by the `services` block in root `vercel.json` |
 
-**The backend has no Vercel presence beyond the status page.** The Go
+**The root `vercel.json` `services` block is load-bearing** — empirically,
+replacing it with a minimal headers-only config broke BOTH projects'
+builds (#99: `motivra-services` lost its build input; deploys failed until
+the prior shape was restored). Treat that file as deploy-critical: change
+it only with Vercel build logs in front of you.
+
+**The backend cannot serve production traffic from Vercel.** The Go
 services are long-running processes that own their Postgres and NATS
-dependencies; they deploy via the compose stack behind a reverse proxy
-(§6 above), not on Vercel. Do not point API rewrites at Vercel — the
-historical root `vercel.json` carried a non-Vercel `services` schema with
-object destinations that compiled into 500 FUNCTION_INVOCATION_FAILED
-routes on `/healthz`, `/readyz` and `/v1/*` (#99). It is now schema-valid
-(security headers only), and `/` on the services project is a static page
-that redirects humans to the product and documents where the API runs.
+dependencies; the containerized `motivra-services` deployment boots
+without them, so its `/healthz` and `/readyz` return
+FUNCTION_INVOCATION_FAILED and `/` has no UI route (404) — this is a
+deployment-target mismatch, not an application defect (#99). The
+supported backend surface is the compose stack behind a reverse proxy
+(§6 above). The customer web project (`motivra`) is the only product UI.
+Do not point API rewrites at Vercel and do not advertise the services
+URL to users.
 
 **Deployment Protection must be disabled for the production surface.**
 Vercel → Project → Settings → Deployment Protection → *Vercel
