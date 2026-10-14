@@ -9,8 +9,14 @@ info:
     with the same human-readable reasons. It recommends; it never assigns.
 
     All endpoints require a Bearer access token issued by the identity
-    service (HS256) with one of the roles DISPATCHER, ADMIN or SUPER_ADMIN.
+    service (asymmetric EdDSA/RS256 with kid, verified via JWKS —
+    ADR-0007) with one of the roles DISPATCHER, ADMIN or SUPER_ADMIN.
     Errors are RFC 7807-style `application/problem+json`.
+
+    Every successful scoring call appends one decision record to the
+    platform's write-once audit trail (actor, tenant, inputs hash, chosen
+    technician, score — issue #88), queryable by operators through
+    `GET /v1/admin/audit` (action `dispatch.decision.scored`).
 servers:
   - url: /
 tags:
@@ -34,6 +40,11 @@ paths:
         weight set. A provided weight set must contain non-negative values
         summing to 1.0. The candidate list is capped at 200 entries; the
         engine is advisory only and never assigns or reassigns a job.
+
+        `job_id` is optional attribution: when set (a non-zero UUID), the
+        persisted decision record links the scoring to the job being
+        staffed. Invalid `job_id` values are rejected with 422 and record
+        nothing.
       tags: [dispatch]
       requestBody:
         required: true
@@ -61,7 +72,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Validation failure (weight sum, candidate ranges or caps, label sizes).
+          description: Validation failure (weight sum, candidate ranges or caps, label sizes, non-UUID or zero job_id).
           content:
             application/problem+json:
               schema:
@@ -107,6 +118,13 @@ components:
       properties:
         job_context:
           $ref: '#/components/schemas/JobContext'
+        job_id:
+          type: string
+          format: uuid
+          description: |
+            Optional identifier of the job being staffed. When present it
+            must be a non-zero UUID and rides the persisted decision record
+            (audit trail, issue #88).
         candidates:
           type: array
           description: Technicians under consideration. Capped at 200 entries.
