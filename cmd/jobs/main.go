@@ -37,7 +37,7 @@ func main() {
 		logger.Error("tracing setup failed", "error", err)
 		os.Exit(1)
 	}
-	metricsHandler, stopMetrics, err := platform.SetupMetrics(cfg.App.Name, cfg.App.Env)
+	metrics, err := platform.SetupMetrics(cfg.App.Name, cfg.App.Env)
 	if err != nil {
 		logger.Error("metrics setup failed", "error", err)
 		os.Exit(1)
@@ -73,6 +73,7 @@ func main() {
 			return pool.Ping(ctx)
 		}),
 		platform.WithMiddleware(platform.AuthMiddleware(validator)),
+		platform.WithMiddleware(metrics.HTTP.Middleware),
 	)
 	jobs.Routes(srv.Router, svc, platform.RequireAuthenticated)
 
@@ -92,12 +93,12 @@ func main() {
 	if publisher != nil {
 		cleanups = append(cleanups, func(context.Context) error { publisher.Close(); return nil })
 	}
-	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metricsHandler)
+	stopMetricsSrv, err := platform.StartMetricsServer(cfg.MetricsAddr, metrics.Handler)
 	if err != nil {
 		logger.Error("metrics listener unavailable", "error", err, "addr", cfg.MetricsAddr)
 		os.Exit(1)
 	}
-	cleanups = append(cleanups, stopMetricsSrv, stopMetrics, stopTracing)
+	cleanups = append(cleanups, stopMetricsSrv, metrics.Stop, stopTracing)
 
 	if err := platform.Graceful(httpSrv, logger, cfg.ShutdownTimeout, cleanups...); err != nil {
 		logger.Error("shutdown completed with errors", "error", err)

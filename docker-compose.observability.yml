@@ -1,0 +1,106 @@
+# Motivra observability stack (observability issue #84, ADR-0005).
+#
+#   docker compose -f docker-compose.app.yml up -d     # app stack first
+#   docker compose -f docker-compose.observability.yml up -d
+#   Grafana:      http://localhost:3001  (anonymous admin enabled)
+#   Prometheus:   http://localhost:9095
+#
+# Attaches to the app stack's `motivra` network (external) so Prometheus
+# can scrape the services' internal metrics listeners (:9090) and the OTel
+# collector can receive their OTLP exports (MOTIVRA_OTEL_ENABLED=true +
+# OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317 in the app .env).
+#
+# Data ships in container-local volumes — mount real volumes and configure
+# retention/object storage before relying on this beyond evaluation.
+
+name: motivra-obs
+
+networks:
+  motivra:
+    external: true
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.112.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC (app services export here)
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+    healthcheck:
+      test: ["CMD", "/healthcheck", "--request", "GET", "--uri", "/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+    mem_limit: 256m
+    networks:
+      - motivra
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9095:9090"
+    restart: unless-stopped
+    mem_limit: 512m
+    networks:
+      - motivra
+
+  loki:
+    image: grafana/loki:3.2.1
+    command: -config.file=/etc/loki/config.yaml
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+    mem_limit: 512m
+    networks:
+      - motivra
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    command: ["-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+    mem_limit: 512m
+    networks:
+      - motivra
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    environment:
+      # Single-node evaluation posture: anonymous admin. For any shared
+      # deployment set GF_SECURITY_ADMIN_PASSWORD and disable anonymous.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_BASIC_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+    mem_limit: 256m
+    networks:
+      - motivra

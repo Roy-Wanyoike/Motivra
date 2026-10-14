@@ -1,0 +1,26 @@
+# Tempo single-node config (filesystem storage) for the observability
+# stack. Traces arrive via the collector's OTLP exporter.
+stream_over_http_enabled: false
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 4317  # receives the collector's otlp/tempo export
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+compactor:
+  compaction:
+    block_retention: 72h

@@ -165,7 +165,7 @@ Honest notes:
 
 ---
 
-## 5. Smoke tests
+## 4a. Smoke tests
 
 Routes below are the real ones from `backend/*/http.go` (mirrored in
 `contracts/*/openapi.yaml`). Run with the app stack up and seeded.
@@ -199,6 +199,40 @@ Expected: `200` on every call; the passport carries the seeded history
 entries for the demo vehicles. `401` means the token is missing/expired;
 `403` means the route requires a role the caller lacks (e.g. `GET /v1/jobs`
 needs DISPATCHER/ADMIN/SUPER_ADMIN).
+
+---
+
+## 5. Monitoring & observability stack
+
+The observability stack (issue #84, ADR-0005) ships as a second compose
+file attached to the app network:
+
+```bash
+docker compose -f docker-compose.app.yml up -d        # app stack first
+docker compose -f docker-compose.observability.yml up -d
+```
+
+| Surface | URL | Notes |
+| --- | --- | --- |
+| Grafana | http://localhost:3001 | anonymous admin — lock down for shared deployments |
+| Prometheus | http://localhost:9095 | scrape targets + alert rules (`observability/alerts.yml`) |
+| OTel collector | localhost:4317/4318 | app services export traces/logs here |
+
+- **Metrics:** every service exposes RED metrics (`http_requests_total`,
+  `http_request_duration_seconds`) on its internal `:9090` listener —
+  never on the public port. Grafana has the "Motivra — Golden Signals"
+  dashboard (rate, 5xx share, p95/p50 latency, scrape health).
+- **Logs:** JSON to stdout, shipped via OTLP to Loki. Every request line
+  carries `request_id`, `trace_id` and (authenticated) `tenant_id`.
+- **Traces:** OTLP → Tempo; enable per service with `MOTIVRA_OTEL_ENABLED=true`
+  and `OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317` in the app `.env`.
+- **Alerts (respond per rule):** `ServiceDown` — check container state and
+  `docker compose logs <svc>`; `High5xxRate` — pull the 5xx lines from
+  Loki via the dashboard, correlate with the deploy timeline;
+  `AuthThrottlePressure` — sustained auth 4xx suggests credential
+  stuffing (the limiter is absorbing it) or a broken client release.
+- Data ships to container-local volumes: mount durable storage and set
+  retention before relying on this beyond evaluation.
 
 ---
 

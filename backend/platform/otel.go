@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	promreg "github.com/prometheus/client_golang/prometheus"
@@ -18,15 +19,20 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
-// SetupTracing configures the global tracer provider with an OTLP gRPC
-// exporter when cfg.Enabled, installs the W3C propagators and returns a
-// shutdown function. When disabled it still installs the propagators so
-// trace context flows through even without export.
-func SetupTracing(ctx context.Context, cfg OTelConfig, serviceName, environment string) (func(context.Context) error, error) {
+// Propagators are installed at package init (not inside SetupTracing) so
+// trace context flows through every request even when OTLP export is
+// disabled — log↔trace correlation depends on it (observability issue #84).
+var installPropagators = sync.OnceFunc(func() {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
+})
+
+// SetupTracing configures the global tracer provider with an OTLP gRPC
+// exporter when cfg.Enabled and returns a shutdown function.
+func SetupTracing(ctx context.Context, cfg OTelConfig, serviceName, environment string) (func(context.Context) error, error) {
+	installPropagators()
 	if !cfg.Enabled {
 		return func(context.Context) error { return nil }, nil
 	}
@@ -71,12 +77,25 @@ func SetupTracing(ctx context.Context, cfg OTelConfig, serviceName, environment 
 // registry plus its HTTP handler (mount at /metrics via WithMount).
 // Services register client_golang collectors for their counters, gauges
 // and histograms; the registry is scrape-ready by construction.
-func SetupMetrics(serviceName, environment string) (http.Handler, func(context.Context) error, error) {
+// Metrics bundles the /metrics exposition handler with the RED HTTP
+// instruments bound to the same registry (observability issue #84). Serve
+// Handler on the internal metrics listener and wire HTTP.Middleware into
+// the server so route traffic is measured.
+type Metrics struct {
+	Handler http.Handler
+	HTTP    *HTTPMetrics
+	Stop    func(context.Context) error
+}
+
+func SetupMetrics(serviceName, environment string) (*Metrics, error) {
 	registry := promreg.NewRegistry()
 	registry.MustRegister(promreg.NewProcessCollector(promreg.ProcessCollectorOpts{}))
 	registry.MustRegister(promreg.NewGoCollector())
 
 	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
-	noop := func(context.Context) error { return nil }
-	return handler, noop, nil
+	return &Metrics{
+		Handler: handler,
+		HTTP:    NewHTTPMetrics(registry, serviceName),
+		Stop:    func(context.Context) error { return nil },
+	}, nil
 }

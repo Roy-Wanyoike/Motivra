@@ -57,6 +57,7 @@ func WithMiddleware(mw func(http.Handler) http.Handler) ServerOption {
 // a trusted proxy the header is client-controlled and spoofable (audit
 // IPs and rate-limit keys must be attacker-unchoosable).
 func NewServer(cfg Config, logger *slog.Logger, opts ...ServerOption) *Server {
+	installPropagators()
 	s := &Server{
 		Router:   chi.NewRouter(),
 		checkers: map[string]Checker{},
