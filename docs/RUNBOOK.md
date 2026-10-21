@@ -205,6 +205,67 @@ needs DISPATCHER/ADMIN/SUPER_ADMIN).
 
 ---
 
+## 4b. Purging demo data & the zero-demo go-live gate (issue #118)
+
+`scripts/purge_demo_data.sh` is the sanctioned removal path for demo rows
+in ANY environment where they must not remain — a shared dev database,
+staging, or a production database that was accidentally seeded. It is the
+inverse of `scripts/seed_demo.sh`: where the seed inserts a closed set of
+fixed-UUID rows, the purge deletes exactly that set and nothing else.
+
+**What it deletes (demo markers only):** the five demo users (fixed UUIDs
+`a0000000-…-0002..0006` and any `*@demo.motivra.app` email) with their
+roles, sessions, verification tokens and audit rows; the demo tenant
+(`…-0001`); the two demo vehicles with components and passport history;
+the demo service request, job, transition trail and assignment; and any
+payments/inspections rows scoped to those markers (normally zero — the
+seed predates those domains). Rows **without** demo markers are provably
+untouched: the script captures per-table (total / demo / preserved) counts
+before and after inside the same transaction and **rolls back** unless
+preserved counts are identical and every demo count lands at zero.
+
+**Append-only tables are handled through the single sanctioned pattern**
+(same guarded window as `scripts/purge_expired.sql`, §5a):
+`DISABLE TRIGGER … append_only` → marker-scoped `DELETE` →
+`ENABLE TRIGGER …`, all inside one transaction, so the triggers are
+re-armed on commit and automatically restored if anything fails.
+
+```bash
+# refusal path (exit 3, nothing happens):
+make purge-demo
+# real run against the app stack (backup-first, then purge):
+make purge-demo DEMO_PURGE_CONFIRM=1
+# arbitrary target:
+DEMO_PURGE_CONFIRM=1 scripts/purge_demo_data.sh postgres://…/motivra?sslmode=disable
+```
+
+Safety envelope: `DEMO_PURGE_CONFIRM=1` is mandatory (exit 3 otherwise);
+a custom-format backup is taken into `./backups/` first (`BACKUP=0` to
+skip, discouraged); the whole purge is one transaction
+(`ON_ERROR_STOP=1`); the script prints the full before/after table as its
+evidence record. Unlike the seed, the purge does **not** refuse
+`MOTIVRA_ENV=production` — removing demo rows from production is exactly
+its purpose; the confirm gate, the backup and the marker scoping are the
+safety envelope.
+
+**Zero-demo go-live gate (mandatory before serving live customers):**
+
+1. `make integrity-check DB_URL=…` — all-clear (orphans zero, triggers armed).
+2. The purge evidence table shows `before_demo` removed and
+   `preserved` identical to `before_total − before_demo` on every row.
+3. On the live customer-facing surface, the demo credential must NEVER
+   authenticate:
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}\n" https://<api-host>/v1/auth/login \
+     -H 'Content-Type: application/json' \
+     -d '{"email":"customer@demo.motivra.app","password":"MotivraDemo!2026","device_name":"go-live-gate"}'
+   # REQUIRED: 401 (or 423). 200 = demo accounts exist on a live surface — STOP.
+   ```
+4. Record the evidence table + probe output in the operations log (the
+   sign-off artifact for issue #118).
+
+---
+
 ## 5. Monitoring & observability stack
 
 The observability stack (issue #84, ADR-0005) ships as a second compose
@@ -453,6 +514,27 @@ look authoritative. Owner actions:
    probes above and this section's URL.
 3. Keep Deployment Protection disabled on the canonical production surface
    (per the section above).
+
+### Deployment governance — production deploys originate from `main` only
+
+Production deployments are created by merges to `main` and by nothing
+else. This is a deployment contract, not a convention (issue #118):
+
+- **Vercel "Production Branch" must be `main`** — Project → Settings →
+  Git → *Production Branch* = `main`. Like Deployment Protection (#96),
+  this toggle lives in the dashboard and is invisible to git; verify it
+  after any project rename, team move, or new project creation.
+- Every other branch (`fix/*`, `feature/*`, `dependabot/*`, `dev`) builds
+  **preview deployments only**. Previews are for review; they must never
+  be promoted to production via the dashboard ("Promote to Production")
+  and must never be aliased to the production domain. Promotion that
+  bypasses `main` bypasses review, QA and the DCO gate.
+- Production rollbacks are `git revert` + PR + merge to `main` (a new
+  production deployment), never a preview promotion or a manual domain
+  reassignment.
+- Post-deploy verification (above) is part of every production merge;
+  a merge whose deployment fails or whose probes fail is treated as a
+  production incident (§9), not as a deployment detail.
 
 ### Known deployment posture
 
