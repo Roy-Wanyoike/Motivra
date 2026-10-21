@@ -68,7 +68,7 @@ is exposed read-only at `GET /v1/jobs/{id}/transitions`.
 |---|---|---|---|
 | POST | /v1/requests | authenticated | create a service request |
 | POST | /v1/requests/{id}/job | authenticated | convert a request into a job |
-| GET | /v1/jobs?status=&limit=&offset | DISPATCHER/ADMIN/SUPER_ADMIN | list jobs by status |
+| GET | /v1/jobs?status=&technician_id=&limit=&offset | DISPATCHER/ADMIN/SUPER_ADMIN | list jobs, optionally narrowed by status/technician (`status` omitted = every status, #123) |
 | GET | /v1/jobs/{id} | authenticated | fetch one job |
 | POST | /v1/jobs/{id}/transitions | DISPATCHER/ADMIN/SUPER_ADMIN | move the job through the machine |
 | GET | /v1/jobs/{id}/transitions | authenticated | read the audit trail |

@@ -130,20 +130,20 @@ func TestJobLifecycleIntegration(t *testing.T) {
 
 	// Scoped listing at the SQL level: the customer sees the job, the
 	// assigned technician sees it, the operator sees it, nobody else does.
-	customerPage, err := store.ListJobsByStatus(ctx, StatusAccepted, 50, 0, viewScope(accepted.CustomerID))
+	customerPage, err := listJobsByStatus(store, ctx, StatusAccepted, 50, 0, viewScope(accepted.CustomerID))
 	require.NoError(t, err)
 	require.Len(t, customerPage, 1)
 	require.Equal(t, accepted.ID, customerPage[0].ID)
 
-	techPage, err := store.ListJobsByStatus(ctx, StatusAccepted, 50, 0, viewScope(technician))
+	techPage, err := listJobsByStatus(store, ctx, StatusAccepted, 50, 0, viewScope(technician))
 	require.NoError(t, err)
 	require.Len(t, techPage, 1)
 
-	opPage, err := store.ListJobsByStatus(ctx, StatusAccepted, 50, 0, op)
+	opPage, err := listJobsByStatus(store, ctx, StatusAccepted, 50, 0, op)
 	require.NoError(t, err)
 	require.Len(t, opPage, 1)
 
-	createdPage, err := store.ListJobsByStatus(ctx, StatusCreated, 50, 0, op)
+	createdPage, err := listJobsByStatus(store, ctx, StatusCreated, 50, 0, op)
 	require.NoError(t, err)
 	require.Empty(t, createdPage, "the job left CREATED: no row in that status bucket")
 
@@ -172,7 +172,7 @@ func TestJobStoreScopeIsolationIntegration(t *testing.T) {
 	// ...and the zero scope fails closed (matches no rows at all).
 	_, err = store.GetJob(ctx, jobB.ID, ReadScope{})
 	require.True(t, errors.Is(err, ErrJobNotFound), "zero scope must match nothing, got %v", err)
-	empty, err := store.ListJobsByStatus(ctx, StatusCreated, 50, 0, ReadScope{})
+	empty, err := listJobsByStatus(store, ctx, StatusCreated, 50, 0, ReadScope{})
 	require.NoError(t, err)
 	assert.Empty(t, empty, "zero scope must return an empty page")
 
@@ -249,7 +249,7 @@ func TestJobTenantIsolationIntegration(t *testing.T) {
 	_, err = store.GetJob(ctx, jobA.ID, tenantScope(tenantB))
 	require.True(t, errors.Is(err, ErrJobNotFound), "cross-tenant get must be not-found, got %v", err)
 
-	pageA, err := store.ListJobsByStatus(ctx, StatusCreated, 50, 0, tenantScope(tenantA))
+	pageA, err := listJobsByStatus(store, ctx, StatusCreated, 50, 0, tenantScope(tenantA))
 	require.NoError(t, err)
 	require.Len(t, pageA, 1, "a tenant page contains only that tenant's rows")
 	require.Equal(t, jobA.ID, pageA[0].ID)
@@ -290,7 +290,7 @@ func TestJobTenantIsolationIntegration(t *testing.T) {
 	// The zero scope still fails closed at the SQL level.
 	_, err = store.GetJob(ctx, jobA.ID, ReadScope{})
 	require.True(t, errors.Is(err, ErrJobNotFound), "zero scope must match nothing, got %v", err)
-	empty, err := store.ListJobsByStatus(ctx, StatusCreated, 50, 0, ReadScope{})
+	empty, err := listJobsByStatus(store, ctx, StatusCreated, 50, 0, ReadScope{})
 	require.NoError(t, err)
 	assert.Empty(t, empty, "zero scope must return an empty page")
 

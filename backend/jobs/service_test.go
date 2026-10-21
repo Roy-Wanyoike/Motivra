@@ -203,12 +203,19 @@ func (f *fakeStore) AcceptAssignment(_ context.Context, jobID uuid.UUID, technic
 	return nil
 }
 
-func (f *fakeStore) ListJobsByStatus(_ context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
+func (f *fakeStore) ListJobs(_ context.Context, filter JobFilter, limit, offset int, scope ReadScope) ([]Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Job
 	for _, j := range f.jobs {
-		if j.Status == status && jobVisible(j, scope) {
+		if filter.Status != nil && j.Status != *filter.Status {
+			continue
+		}
+		if filter.TechnicianID != nil &&
+			(j.TechnicianID == nil || *j.TechnicianID != *filter.TechnicianID) {
+			continue
+		}
+		if jobVisible(j, scope) {
 			out = append(out, j)
 		}
 	}
@@ -221,6 +228,14 @@ func (f *fakeStore) ListJobsByStatus(_ context.Context, status Status, limit, of
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// listJobsByStatus adapts the store-level JobFilter list to the by-status
+// shape the scoping and integration assertions were written against.
+func listJobsByStatus[S interface {
+	ListJobs(context.Context, JobFilter, int, int, ReadScope) ([]Job, error)
+}](store S, ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
+	return store.ListJobs(ctx, JobFilter{Status: &status}, limit, offset, scope)
 }
 
 func (f *fakeStore) ListTransitions(_ context.Context, jobID uuid.UUID, scope ReadScope) ([]JobTransition, error) {

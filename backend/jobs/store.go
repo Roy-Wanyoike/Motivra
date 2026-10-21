@@ -17,8 +17,20 @@ var ErrRequestNotFound = errors.New("jobs: service request not found")
 // ErrJobNotFound is returned by job reads when the job does not exist.
 var ErrJobNotFound = errors.New("jobs: job not found")
 
-// Pagination defaults applied by ListJobsByStatus when limit is not
-// provided or exceeds the cap.
+// JobFilter is the optional narrow of a jobs list query. A nil/zero field
+// means "no constraint on that column"; both set fields AND together.
+// Filters feed operator read surfaces (the ops console job board, issue
+// #123); the scope argument still applies on top of every filter.
+type JobFilter struct {
+	// Status narrows the page to one job status; nil lists every status.
+	Status *Status
+	// TechnicianID narrows the page to jobs assigned to one technician; nil
+	// lists every assignment state.
+	TechnicianID *uuid.UUID
+}
+
+// Pagination defaults applied by ListJobs when limit is not provided or
+// exceeds the cap.
 const (
 	defaultListLimit = 50
 	maxListLimit     = 200
@@ -76,11 +88,12 @@ type Store interface {
 	// wrapping ErrJobNotFound when the job does not exist.
 	AcceptAssignment(ctx context.Context, jobID uuid.UUID, technicianID uuid.UUID) error
 
-	// ListJobsByStatus returns jobs in the given status, newest first,
+	// ListJobs returns jobs matching the optional filter, newest first,
 	// limited to those visible to scope. limit <= 0 selects
 	// defaultListLimit and limit is capped at maxListLimit; offset < 0 is
-	// treated as 0.
-	ListJobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error)
+	// treated as 0. A nil Status lists every status (issue #123: the ops
+	// console job board needs the cross-status board page).
+	ListJobs(ctx context.Context, filter JobFilter, limit, offset int, scope ReadScope) ([]Job, error)
 
 	// ListTransitions returns the job's transition audit trail in
 	// chronological order (oldest first), limited to rows the scope can
@@ -418,11 +431,13 @@ func (s *PostgresStore) AcceptAssignment(ctx context.Context, jobID uuid.UUID, t
 	return nil
 }
 
-// ListJobsByStatus implements Store. Operator scopes see the platform-wide
-// page; tenant scopes are filtered to their tenant's rows and personal
-// scopes to owned/assigned rows at the query level, so the route's RBAC
-// gate is never the only enforcement layer.
-func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
+// ListJobs implements Store. Operator scopes see the platform-wide page;
+// tenant scopes are filtered to their tenant's rows and personal scopes to
+// owned/assigned rows at the query level, so the route's RBAC gate is never
+// the only enforcement layer. The filter narrows the page further: a nil
+// Status lists every status, a nil TechnicianID lists every assignment
+// state (both filters AND together when set).
+func (s *PostgresStore) ListJobs(ctx context.Context, filter JobFilter, limit, offset int, scope ReadScope) ([]Job, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
@@ -434,9 +449,19 @@ func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, lim
 	}
 	query := `SELECT ` + jobColumns + `
                 FROM jobs
-                WHERE status = $1`
-	args := []any{status}
-	pred, predArgs := jobScopePredicate(scope, 2)
+                WHERE 1 = 1`
+	args := []any{}
+	if filter.Status != nil {
+		args = append(args, *filter.Status)
+		query += fmt.Sprintf(`
+                AND status = $%d`, len(args))
+	}
+	if filter.TechnicianID != nil {
+		args = append(args, *filter.TechnicianID)
+		query += fmt.Sprintf(`
+                AND technician_id = $%d`, len(args))
+	}
+	pred, predArgs := jobScopePredicate(scope, len(args)+1)
 	if pred != "" {
 		query += ` AND ` + pred
 		args = append(args, predArgs...)
@@ -448,7 +473,7 @@ func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, lim
 	args = append(args, limit, offset)
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("jobs: list jobs by status: %w", err)
+		return nil, fmt.Errorf("jobs: list jobs: %w", err)
 	}
 	defer rows.Close()
 
@@ -461,7 +486,7 @@ func (s *PostgresStore) ListJobsByStatus(ctx context.Context, status Status, lim
 		out = append(out, j)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("jobs: list jobs by status: %w", err)
+		return nil, fmt.Errorf("jobs: list jobs: %w", err)
 	}
 	return out, nil
 }

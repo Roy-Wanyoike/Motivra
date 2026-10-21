@@ -87,7 +87,7 @@ func TestCrossTenantStoreReadsDenied(t *testing.T) {
 	// Zero scope fails closed: no viewer, no rows.
 	_, err := svc.GetJob(ctx, jobB.ID, ReadScope{})
 	require.True(t, errors.Is(err, ErrJobNotFound), "zero scope must match nothing, got %v", err)
-	empty, err := store.ListJobsByStatus(ctx, StatusCreated, 10, 0, ReadScope{})
+	empty, err := listJobsByStatus(store, ctx, StatusCreated, 10, 0, ReadScope{})
 	require.NoError(t, err)
 	assert.Empty(t, empty, "zero scope must return an empty page")
 	assert.Empty(t, mustTransitions(t, store, jobB.ID, ReadScope{}), "zero scope must see no transitions")
@@ -235,7 +235,7 @@ func TestTenantScopedReadsDeriveFromTenantID(t *testing.T) {
 	// The zero scope still fails closed with the tenancy columns present.
 	_, err = svc.GetJob(ctx, jobA.ID, ReadScope{})
 	require.True(t, errors.Is(err, ErrJobNotFound), "zero scope must match nothing, got %v", err)
-	empty, err := store.ListJobsByStatus(ctx, StatusCreated, 10, 0, ReadScope{})
+	empty, err := listJobsByStatus(store, ctx, StatusCreated, 10, 0, ReadScope{})
 	require.NoError(t, err)
 	assert.Empty(t, empty, "zero scope must return an empty page")
 }
