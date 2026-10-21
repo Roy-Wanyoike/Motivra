@@ -381,8 +381,18 @@ func TestListJobsByStatusEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
 	assert.Equal(t, "validation_failed", decodeBody(t, w)["code"])
 
+	// status is now OPTIONAL (issue #123): an omitted/empty status lists
+	// jobs across every status, newest first. Previously this answered 422;
+	// no consumer depended on the empty-status rejection.
+	w = do(t, h, http.MethodGet, "/v1/jobs", dispatcher, nil)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
+	assert.Len(t, rows, 3, "no status filter lists every status")
+
 	w = do(t, h, http.MethodGet, "/v1/jobs?status=", dispatcher, nil)
-	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	require.Equal(t, http.StatusOK, w.Code, "an empty status query value means unfiltered")
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
+	assert.Len(t, rows, 3)
 
 	w = do(t, h, http.MethodGet, "/v1/jobs?status=CREATED&limit=0&offset=-3", dispatcher, nil)
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
@@ -394,6 +404,65 @@ func TestListJobsByStatusEndpoint(t *testing.T) {
 
 	// The list endpoint is dispatcher/admin only.
 	w = do(t, h, http.MethodGet, "/v1/jobs?status=CREATED", customer, nil)
+	require.Equal(t, http.StatusForbidden, w.Code)
+	w = do(t, h, http.MethodGet, "/v1/jobs", customer, nil)
+	require.Equal(t, http.StatusForbidden, w.Code, "the unfiltered page is operator-only too")
+}
+
+// TestListJobsTechnicianFilterEndpoint proves the issue #123 operator-board
+// narrow: technician_id filters the page to one technician's assignments,
+// combines with the status filter, and rejects malformed identifiers.
+func TestListJobsTechnicianFilterEndpoint(t *testing.T) {
+	t.Parallel()
+	h, store, _, svc := newTestAPI(t)
+	dispatcher, _ := tokenFor(t, RoleDispatcher)
+	customer, _ := tokenFor(t, RoleCustomer)
+
+	techA, techB := uuid.New(), uuid.New()
+	created := jobInStore(t, store, StatusCreated)
+
+	// Assignment through the legal dispatch path, then a reassignment that
+	// steps back through DISPATCHING (ASSIGNED -> DISPATCHING is the legal
+	// reassignment move) and stamps a different technician.
+	op := ReadScope{Operator: true}
+	ctx := context.Background()
+	require.NoError(t, svc.Transition(ctx, created.ID, StatusTriaging, nil, "triage", op))
+	require.NoError(t, svc.Transition(ctx, created.ID, StatusDispatching, nil, "dispatch", op))
+	require.NoError(t, svc.AssignTechnician(ctx, created.ID, techA, nil, op))
+	require.NoError(t, svc.Transition(ctx, created.ID, StatusDispatching, nil, "reassign", op))
+	require.NoError(t, svc.AssignTechnician(ctx, created.ID, techB, nil, op))
+
+	w := do(t, h, http.MethodGet, "/v1/jobs?technician_id="+techA.String(), dispatcher, nil)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
+	assert.Empty(t, rows, "techA's assignment was superseded by the reassignment")
+
+	w = do(t, h, http.MethodGet, "/v1/jobs?technician_id="+techB.String(), dispatcher, nil)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, created.ID.String(), rows[0]["id"])
+	assert.Equal(t, techB.String(), rows[0]["technician_id"])
+
+	// Combined narrow: status + technician_id AND together.
+	w = do(t, h, http.MethodGet, "/v1/jobs?status=ASSIGNED&technician_id="+techB.String(), dispatcher, nil)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+
+	w = do(t, h, http.MethodGet, "/v1/jobs?status=CREATED&technician_id="+techB.String(), dispatcher, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
+	assert.Empty(t, rows, "status and technician filters AND together")
+
+	// Malformed technician_id is a validation error, never a 500.
+	w = do(t, h, http.MethodGet, "/v1/jobs?technician_id=not-a-uuid", dispatcher, nil)
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Equal(t, "validation_failed", decodeBody(t, w)["code"])
+
+	// The technician narrow is operator-only, like the rest of the list.
+	w = do(t, h, http.MethodGet, "/v1/jobs?technician_id="+techA.String(), customer, nil)
 	require.Equal(t, http.StatusForbidden, w.Code)
 }
 

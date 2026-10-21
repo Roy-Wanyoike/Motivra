@@ -275,12 +275,13 @@ func (s *Service) Transitions(ctx context.Context, jobID uuid.UUID, scope ReadSc
 	return s.store.ListTransitions(ctx, jobID, scope)
 }
 
-// JobsByStatus lists jobs in the given status, newest first, with the
+// Jobs lists jobs matching the optional filter, newest first, with the
 // service's pagination discipline (defaults and caps), limited to what
-// scope can see.
-func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
-	if !isKnownStatus(status) {
-		return nil, fmt.Errorf("jobs: list jobs by status: unknown status %q", status)
+// scope can see. A nil Status in the filter lists every status; a nil
+// TechnicianID lists every assignment state (issue #123: operator board).
+func (s *Service) Jobs(ctx context.Context, filter JobFilter, limit, offset int, scope ReadScope) ([]Job, error) {
+	if filter.Status != nil && !isKnownStatus(*filter.Status) {
+		return nil, fmt.Errorf("jobs: list jobs: unknown status %q", *filter.Status)
 	}
 	if limit <= 0 {
 		limit = DefaultJobsLimit
@@ -291,11 +292,18 @@ func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset
 	if offset < 0 {
 		offset = 0
 	}
-	jobs, err := s.store.ListJobsByStatus(ctx, status, limit, offset, scope)
+	jobs, err := s.store.ListJobs(ctx, filter, limit, offset, scope)
 	if err != nil {
-		return nil, fmt.Errorf("jobs: list jobs by status: %w", err)
+		return nil, fmt.Errorf("jobs: list jobs: %w", err)
 	}
 	return jobs, nil
+}
+
+// JobsByStatus lists jobs in the given status, newest first, with the
+// service's pagination discipline (defaults and caps), limited to what
+// scope can see. Thin compatibility wrapper over Jobs.
+func (s *Service) JobsByStatus(ctx context.Context, status Status, limit, offset int, scope ReadScope) ([]Job, error) {
+	return s.Jobs(ctx, JobFilter{Status: &status}, limit, offset, scope)
 }
 
 // correlationFromContext sources the event correlation_id from the

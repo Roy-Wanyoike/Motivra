@@ -37,7 +37,10 @@ const maxRequestBytes int64 = 64 << 10
 //
 //	POST /v1/requests                        create a service request (any authenticated user)
 //	POST /v1/requests/{requestID}/job        convert a request into a job (its customer or an operator)
-//	GET  /v1/jobs?status=&limit=&offset      list jobs by status (DISPATCHER/ADMIN/SUPER_ADMIN)
+//	GET  /v1/jobs?status=&technician_id=&limit=&offset
+//	                                         list jobs, optionally narrowed
+//	                                         by status/technician
+//	                                         (DISPATCHER/ADMIN/SUPER_ADMIN)
 //	GET  /v1/jobs/{jobID}                    fetch one job (its customer, the assigned technician, or an operator)
 //	POST /v1/jobs/{jobID}/transitions        move a job through the machine (DISPATCHER/ADMIN/SUPER_ADMIN)
 //	GET  /v1/jobs/{jobID}/transitions        read the transition audit trail (same visibility as fetching the job)
@@ -410,10 +413,13 @@ func (s *Service) handleListTransitions(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleListJobs implements GET /v1/jobs?status=&limit=&offset. The route
-// is RBAC-gated to platform operators, and the store still scopes the page
-// by the caller (defense in depth: middleware alone is never the only
-// check, ADR-0004).
+// handleListJobs implements GET /v1/jobs?status=&technician_id=&limit=&offset.
+// The route is RBAC-gated to platform operators, and the store still scopes
+// the page by the caller (defense in depth: middleware alone is never the
+// only check, ADR-0004). status is optional — when omitted, jobs are listed
+// across every status (issue #123: the ops console board needs the
+// cross-status page) — and technician_id, when present, must be a UUID that
+// narrows the page to one technician's assignments.
 func (s *Service) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	scope, ok := readScope(r)
 	if !ok {
@@ -421,23 +427,30 @@ func (s *Service) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	rawStatus := strings.TrimSpace(query.Get("status"))
-	if rawStatus == "" {
-		platform.WriteError(w, platform.ErrValidation("status is required",
-			platform.FieldError{Field: "status", Issue: "is required"}))
-		return
+	filter := JobFilter{}
+	if rawStatus := strings.TrimSpace(query.Get("status")); rawStatus != "" {
+		status, err := parseStatus(rawStatus)
+		if err != nil {
+			platform.WriteError(w, err)
+			return
+		}
+		filter.Status = &status
 	}
-	status, err := parseStatus(rawStatus)
-	if err != nil {
-		platform.WriteError(w, err)
-		return
+	if rawTechnician := strings.TrimSpace(query.Get("technician_id")); rawTechnician != "" {
+		technicianID, err := uuid.Parse(rawTechnician)
+		if err != nil {
+			platform.WriteError(w, platform.ErrValidation("technician_id is not a valid identifier",
+				platform.FieldError{Field: "technician_id", Issue: "must be a uuid"}))
+			return
+		}
+		filter.TechnicianID = &technicianID
 	}
 	limit, offset, err := listPagination(r)
 	if err != nil {
 		platform.WriteError(w, err)
 		return
 	}
-	jobs, err := s.JobsByStatus(r.Context(), status, limit, offset, scope)
+	jobs, err := s.Jobs(r.Context(), filter, limit, offset, scope)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -478,7 +491,7 @@ func uuidFromRequest(r *http.Request, name string) (uuid.UUID, error) {
 }
 
 // listPagination parses ?limit and ?offset. Defaults and the cap mirror
-// Store.ListJobsByStatus semantics.
+// Store.ListJobs semantics.
 func listPagination(r *http.Request) (limit int, offset int, err error) {
 	query := r.URL.Query()
 	limit = DefaultJobsLimit
