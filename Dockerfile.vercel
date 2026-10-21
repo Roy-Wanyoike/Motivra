@@ -1,0 +1,81 @@
+# Motivra Vercel container image — Services-mode backend (issue #122).
+#
+# This image is the entrypoint of the "app" service in the ROOT vercel.json
+# ("services": { "app": { "root": ".", "runtime": "container",
+# "entrypoint": "Dockerfile.vercel" } }). The root Dockerfile remains the
+# docker-compose/VPS contract and is intentionally untouched.
+#
+# Build a service with:
+#   docker build -f Dockerfile.vercel --build-arg SERVICE=identity -t motivra-identity:vercel .
+#
+# SERVICE selects the cmd/<SERVICE> entrypoint. Allowed values are exactly
+# the deployable services in cmd/ (ADR-0001: "cmd/<service>/main.go — one
+# entrypoint per deployable service"): identity, vehicles, jobs, dispatch.
+# NOTE (ADR-level flag, issue #122 requirement 6): one container runs ONE
+# binary, so all /v1/* rewrites hit a single service — a gateway binary or
+# per-service rewrites must be decided before the API surface widens.
+#
+# Env contract: backend/platform/config.go (see .env.example).
+
+# --- Build stage -------------------------------------------------------------
+# golang image pinned to the go directive in go.mod (currently 1.27.1).
+# Bump both together.
+FROM golang:1.27.1-alpine AS build
+
+ARG SERVICE=identity
+
+# Fail fast (and loudly) on unknown services instead of silently producing
+# a broken image; also rules out path traversal via --build-arg.
+RUN case "$SERVICE" in \
+      identity|vehicles|jobs|dispatch) ;; \
+      *) echo "ERROR: SERVICE must be one of: identity, vehicles, jobs, dispatch (got '$SERVICE')" >&2; exit 1 ;; \
+    esac
+
+WORKDIR /src
+
+# Cache module downloads independently of source changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Static binary: no CGO, trimmed paths, no debug info in the runtime image.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/motivra-"$SERVICE" ./cmd/"$SERVICE"
+
+# --- Runtime stage -----------------------------------------------------------
+FROM alpine:3.21
+
+LABEL org.opencontainers.image.title="Motivra service (Vercel)" \
+      org.opencontainers.image.description="Motivra backend service image for Vercel Services mode (built from cmd/\${SERVICE})" \
+      org.opencontainers.image.source="https://github.com/Roy-Wanyoike/Motivra"
+
+# ca-certificates: outbound TLS (OTel exporter, NATS/Redis/Postgres TLS,
+# future provider integrations). No wget healthcheck: Vercel manages the
+# container lifecycle and probes the routed routes itself.
+RUN apk add --no-cache ca-certificates \
+ && addgroup -g 10001 motivra \
+ && adduser -u 10001 -G motivra -D -H -s /sbin/nologin motivra
+
+COPY --from=build /out/motivra-* /usr/local/bin/motivra-service
+
+# Non-root. Numeric UID/GID so runAsNonRoot checks resolve.
+USER 10001:10001
+
+# Vercel port contract (issue #122): Vercel routes container traffic to
+# $PORT (default 80) — EXPOSE is inert on Vercel and configures nothing,
+# which is why this Dockerfile deliberately declares neither EXPOSE nor a
+# HEALTHCHECK. The server resolves its listen port as
+#   PORT > MOTIVRA_PORT > 8080   (backend/platform/config.go)
+# so a project-level PORT always wins over the value below. The Vercel
+# project MUST set the env var PORT=8080 (Project → Settings → Environment
+# Variables) so the edge routes to the same port this image listens on;
+# a mismatch is the exact FUNCTION_INVOCATION_FAILED failure from #122.
+ENV MOTIVRA_PORT=8080
+
+# Liveness is GET /healthz, readiness GET /readyz
+# (backend/platform/server.go); the root vercel.json rewrites route both
+# to this service. The services listen on ":<port>" — every interface —
+# which is what Vercel's container runtime expects.
+
+ENTRYPOINT ["/usr/local/bin/motivra-service"]
