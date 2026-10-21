@@ -88,6 +88,49 @@ git commit -s                                # add the sign-off when committing
 
 The script skips merge commits and GitHub web-flow commits (no content authorship), and fails with a rebase recipe when a commit is unsigned or mismatched. Commits merged before the gate existed are grandfathered (rationale on issue #54); all new commits must pass.
 
+### 2c. Motivra Command — the staff-only ops console (issue #123)
+
+`apps/command` is the internal operations surface (Next.js 16, TypeScript,
+Tailwind 4): a live job board (jobs + dispatch read APIs), an escalations
+queue (jobs in `ESCALATED` / `AWAITING_APPROVAL` / `FAILED`), and a system
+health panel aggregating `/healthz` + `/readyz` for identity, vehicles,
+jobs, dispatch, inspections and payments. Incidents are deliberately
+deferred — no incidents read model exists in the backend (tracked in
+issue #128). Read-only for the MVP: the console performs **no mutations**.
+
+```bash
+cd apps/command
+npm install
+cp .env.example .env.local    # adjust per-service URLs for your topology
+npm run dev                   # http://localhost:3000 (staff sign-in at /login)
+npm run test                  # vitest — RBAC matrix, token verification, panels
+```
+
+Environment (full annotated list in `apps/command/.env.example`; all
+server-side — nothing is `NEXT_PUBLIC_*`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `COMMAND_IDENTITY_URL` | `http://localhost:8081` | identity service (login/refresh/logout + JWKS) |
+| `COMMAND_JOBS_URL` | `http://localhost:8083` | jobs service (board + escalations) |
+| `COMMAND_DISPATCH_URL` | `http://localhost:8084` | dispatch factors catalogue |
+| `COMMAND_VEHICLES_URL` / `COMMAND_PAYMENTS_URL` / `COMMAND_INSPECTIONS_URL` | `:8082` / `:8085` / `:8086` | health probes only |
+| `COMMAND_API_BASE_URL` | — | gateway fallback for any service URL left unset |
+| `COMMAND_JWKS_URL` | `${COMMAND_IDENTITY_URL}/.well-known/jwks.json` | token-verification keys |
+| `COMMAND_JWT_ISSUER` / `COMMAND_JWT_AUDIENCE` | `motivra-identity` / `motivra` | must match the backend's `MOTIVRA_JWT_*` |
+| `COMMAND_JWT_ALLOW_HS256` / `COMMAND_JWT_SECRET` | unset | legacy HS256 migration window ONLY (ADR-0007) |
+| `COMMAND_AUTO_REFRESH_SECONDS` / `COMMAND_UPSTREAM_TIMEOUT_MS` | `20` / `4000` | panel refresh interval / upstream timeout |
+
+Roles: access is **deny-by-default**. Only `DISPATCHER`, `ADMIN` and
+`SUPER_ADMIN` reach any route (`apps/command/src/lib/auth/staff.ts` — the
+jobs service' operator read scope); authenticated non-staff get **403**;
+anonymous callers are redirected to `/login` with no data. The proxy gate
+(`src/proxy.ts`) plus per-page re-verification (`src/lib/auth/page-guard.ts`)
+enforce the two-layer rule (ADR-0004). Customer/technician references are
+masked on screen (`docs/PII-HANDLING.md`) and every console view is
+audit-logged to stdout. Staff accounts come from the identity service —
+seed them per §4, or promote an existing user's role there.
+
 ---
 
 ## 3. Full-stack path (everything in containers)
