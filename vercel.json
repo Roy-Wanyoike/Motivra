@@ -1,34 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
-    "app": {
-      "root": ".",
-      "runtime": "container"
-    },
-    "customer": {
-      "root": "apps/customer",
-      "framework": "nextjs"
-    }
+    "customer": { "root": "apps/customer" },
+    "app": { "root": ".", "runtime": "container", "entrypoint": "Dockerfile.vercel" }
   },
   "rewrites": [
-    {
-      "source": "/v1/(.*)",
-      "destination": {
-        "service": "app"
-      }
-    },
-    {
-      "source": "/healthz",
-      "destination": {
-        "service": "app"
-      }
-    },
-    {
-      "source": "/readyz",
-      "destination": {
-        "service": "app"
-      }
-    }
+    { "source": "/v1/(.*)", "destination": { "service": "app" } },
+    { "source": "/healthz", "destination": { "service": "app" } },
+    { "source": "/readyz", "destination": { "service": "app" } },
+    { "source": "/(.*)", "destination": { "service": "customer" } }
   ],
   "headers": [
     {

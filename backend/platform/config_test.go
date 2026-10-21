@@ -7,7 +7,11 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
+	// Clear both port sources: ambient PORT (common on PaaS build hosts)
+	// would otherwise win and break the default assertion (#122).
 	t.Setenv("MOTIVRA_APP_NAME", "")
+	t.Setenv("MOTIVRA_PORT", "")
+	t.Setenv("PORT", "")
 	cfg := Load()
 	if cfg.App.Name != "motivra" || cfg.App.Port != "8080" {
 		t.Fatalf("unexpected defaults: %+v", cfg.App)
@@ -17,32 +21,42 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-// PORT is the PaaS/container convention (platforms inject the listen port
-// as PORT). MOTIVRA_PORT must still win; PORT applies only when
-// MOTIVRA_PORT is unset; 8080 is the compose default.
+// The listen port resolves in strict precedence: PORT first (the
+// PaaS/container contract — platforms that inject a listen port always
+// inject PORT, and on Vercel the edge routes traffic to $PORT, issue
+// #122), then MOTIVRA_PORT (the compose/.env convention), then the 8080
+// default.
 func TestLoadPortFallback(t *testing.T) {
-	t.Setenv("MOTIVRA_PORT", "")
-	t.Setenv("PORT", "3000")
-	if cfg := Load(); cfg.App.Port != "3000" {
-		t.Fatalf("PORT fallback not applied: port = %q", cfg.App.Port)
-	}
+	t.Run("both unset yields 8080 default", func(t *testing.T) {
+		t.Setenv("MOTIVRA_PORT", "")
+		t.Setenv("PORT", "")
+		if cfg := Load(); cfg.App.Port != "8080" {
+			t.Fatalf("default port not applied: port = %q", cfg.App.Port)
+		}
+	})
 
-	t.Setenv("MOTIVRA_PORT", "9090")
-	if cfg := Load(); cfg.App.Port != "9090" {
-		t.Fatalf("MOTIVRA_PORT must win over PORT: port = %q", cfg.App.Port)
-	}
+	t.Run("PORT wins over MOTIVRA_PORT", func(t *testing.T) {
+		t.Setenv("MOTIVRA_PORT", "9090")
+		t.Setenv("PORT", "3000")
+		if cfg := Load(); cfg.App.Port != "3000" {
+			t.Fatalf("PORT must win over MOTIVRA_PORT: port = %q", cfg.App.Port)
+		}
+	})
 
-	t.Setenv("MOTIVRA_PORT", "")
-	t.Setenv("PORT", "")
-	if cfg := Load(); cfg.App.Port != "8080" {
-		t.Fatalf("default port not applied: port = %q", cfg.App.Port)
-	}
+	t.Run("MOTIVRA_PORT applies when PORT unset", func(t *testing.T) {
+		t.Setenv("PORT", "")
+		t.Setenv("MOTIVRA_PORT", "9090")
+		if cfg := Load(); cfg.App.Port != "9090" {
+			t.Fatalf("MOTIVRA_PORT fallback not applied: port = %q", cfg.App.Port)
+		}
+	})
 }
 
 func TestLoadOverrides(t *testing.T) {
 	t.Setenv("MOTIVRA_APP_NAME", "identity")
 	t.Setenv("MOTIVRA_ENV", "production")
 	t.Setenv("MOTIVRA_PORT", "9090")
+	t.Setenv("PORT", "") // keep ambient PORT from overriding MOTIVRA_PORT
 	t.Setenv("MOTIVRA_SHUTDOWN_TIMEOUT", "30s")
 	t.Setenv("MOTIVRA_OTEL_ENABLED", "true")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")

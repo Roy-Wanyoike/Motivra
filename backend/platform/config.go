@@ -28,7 +28,10 @@ const (
 type AppConfig struct {
 	Name string // MOTIVRA_APP_NAME
 	Env  string // MOTIVRA_ENV: development | test | staging | production
-	Port string // MOTIVRA_PORT
+	// Port resolves in strict precedence: PORT (the PaaS/container contract —
+	// Vercel routes container traffic to $PORT, issue #122) > MOTIVRA_PORT
+	// (the compose/.env convention) > 8080.
+	Port string
 }
 
 // DatabaseConfig holds PostgreSQL connection settings.
@@ -141,10 +144,11 @@ func Load() Config {
 		App: AppConfig{
 			Name: envOr("MOTIVRA_APP_NAME", "motivra"),
 			Env:  env,
-			// MOTIVRA_PORT wins; then PORT (the PaaS/container convention —
-			// platforms that inject a listen port always inject PORT);
-			// otherwise the 8080 compose default.
-			Port: envOr("MOTIVRA_PORT", envOr("PORT", "8080")),
+			// PORT wins (the PaaS/container contract — platforms that inject
+			// a listen port always inject PORT; on Vercel the edge routes
+			// traffic to $PORT, issue #122); then MOTIVRA_PORT (the
+			// compose/.env convention); otherwise the 8080 default.
+			Port: envOr("PORT", envOr("MOTIVRA_PORT", "8080")),
 		},
 		Database: DatabaseConfig{URL: os.Getenv("MOTIVRA_DATABASE_URL")},
 		Redis:    RedisConfig{URL: os.Getenv("MOTIVRA_REDIS_URL")},

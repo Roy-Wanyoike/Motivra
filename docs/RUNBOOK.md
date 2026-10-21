@@ -410,21 +410,25 @@ TLS at the edge, and monitoring attached.
   `127.0.0.1:8081-8086`.
 - The Vercel edge (for the customer web) carries HSTS preload and the
   security-header set; keep `vercel.json` and the proxy headers in sync.
-  API paths are NOT served from Vercel — clients reach `/v1/*` on the
-  platform's own domain once the backend host is public.
+  Since #122 the same domain also serves `/v1/*` via same-origin rewrites
+  to the container service (see the Services-mode routing contract below),
+  so the customer app's CSP `connect-src 'self'` keeps working unchanged.
 - Rate limiting lives in the identity service; add edge-level limits
   (per-IP connection/request caps) at the proxy for defense in depth.
 
 ### Vercel project configuration (customer web + backend posture)
 
-Two Vercel projects build from this repository. Their dashboard settings are
-part of the deployment contract — a wrong toggle here is invisible in git and
-can silently take the product offline (#96, #99).
+Their dashboard settings are part of the deployment contract — a wrong toggle
+here is invisible in git and can silently take the product offline (#96, #99).
+
+*(Table superseded by #122, 2026-10-22: ONE Services-mode project serves
+web + API on one domain — see the routing contract below. The historical
+two-project split was:)*
 
 | Project | Builds | Required settings |
 | --- | --- | --- |
-| `motivra` | `apps/customer` (Next.js) | Root Directory `apps/customer`; framework Next.js (auto-detected); install command `npm install` |
-| `motivra-services` | repository root (Dockerfile) | Root Directory repository root; framework Other; container build driven by the `services` block in root `vercel.json` |
+| `motivra` | `apps/customer` (Next.js) | Root Directory `apps/customer`; framework Next.js (auto-detected); install command `npm install`. **DUPLICATE under the #122 contract — owner must delete it** |
+| `motivra-services` | repository root (now `Dockerfile.vercel`) | Root Directory repository root; framework Other; container build driven by the `services` block in root `vercel.json` |
 
 **The root `vercel.json` `services` block is load-bearing** — empirically,
 replacing it with a minimal headers-only config broke BOTH projects'
@@ -432,16 +436,17 @@ builds (#99: `motivra-services` lost its build input; deploys failed until
 the prior shape was restored). Treat that file as deploy-critical: change
 it only with Vercel build logs in front of you.
 
-**The backend cannot serve production traffic from Vercel.** The Go
-services are long-running processes that own their Postgres and NATS
-dependencies; the containerized `motivra-services` deployment boots
-without them, so its `/healthz` and `/readyz` return
-FUNCTION_INVOCATION_FAILED and `/` has no UI route (404) — this is a
-deployment-target mismatch, not an application defect (#99). The
-supported backend surface is the compose stack behind a reverse proxy
-(§6 above). The customer web project (`motivra`) is the only product UI.
-Do not point API rewrites at Vercel and do not advertise the services
-URL to users.
+**The backend cannot serve production traffic from Vercel.** *(Superseded
+by #122 — see the routing contract below.)* The #99-era posture held that
+the Vercel container was an unsupported backend target because it booted
+without its Postgres and NATS dependencies (`/healthz` →
+FUNCTION_INVOCATION_FAILED, `/` → 404). #122 keeps the compose stack as the
+supported self-hosted backend surface AND makes the Vercel container a real
+full-stack surface by (a) adding the missing catch-all rewrite to the
+frontend and (b) requiring the backend env contract from `.env.example`
+(Postgres/Redis/NATS/OTel + `PORT`) on the project. Routing alone does not
+make the backend healthy: without that env contract every container-routed
+path still fails.
 
 **Deployment Protection must be disabled for the production surface.**
 Vercel → Project → Settings → Deployment Protection → *Vercel
@@ -452,12 +457,10 @@ sees a Vercel login page or "page unavailable" instead of the app. This is
 the exact failure mode behind #96 and it produces **no build error and no
 commit-status failure**; it can only be caught by probing the public URL.
 
-Environment variables (project `motivra`): `NEXT_PUBLIC_API_BASE_URL` is
-optional while the customer app runs standalone — empty means same-origin,
-which is correct once the `/v1/*` rewrites to the services deployment are
-active. Set it to the services base URL only when that URL is publicly
-reachable (or a protection-bypass secret is configured), otherwise API
-calls fail behind the same SSO wall.
+Environment variables (canonical project): `NEXT_PUBLIC_API_BASE_URL` stays
+UNSET — empty means same-origin, which is exactly the state now that the
+`/v1/*` rewrites to the container service are active (#122). Never point it
+at a cross-origin host without a matching CSP change (`connect-src 'self'`).
 
 Post-deploy verification (run from a clean session, no Vercel cookies):
 
@@ -470,7 +473,68 @@ curl -s https://<CANONICAL-FRONTEND-DOMAIN>/ | grep -o "<title>[^<]*</title>"
 curl -s -o /dev/null -w "%{http_code}\n" https://<CANONICAL-FRONTEND-DOMAIN>/login
 ```
 
+### Services-mode routing contract (issue #122)
+
+The root `vercel.json` runs in **Vercel Services mode**: `services.customer`
+builds the Next.js web (root `apps/customer`) and `services.app` builds the
+backend container (entrypoint `Dockerfile.vercel`). In Services mode a
+service receives public traffic ONLY through the top-level `rewrites` table
+— a service with no matching rewrite is unreachable from the internet no
+matter how green its build or commit statuses are. The contract:
+
+| Rewrite (order matters) | Destination | Purpose |
+| --- | --- | --- |
+| `/v1/(.*)` | service `app` | backend API |
+| `/healthz`, `/readyz` | service `app` | liveness / readiness |
+| `/(.*)` | service `customer` | **catch-all — MUST stay the LAST rewrite** |
+
+The catch-all swallows every unmatched path, so any rewrite appended after
+it — or a missing catch-all — silently blackholes traffic. That is the
+exact #122 outage shape: green deployments and commit statuses, `404` on
+`/` and `/login`. Treat the rewrite ORDER as deploy-critical, like the
+`services` block itself (#99).
+
+**Container port rule.** Vercel routes container traffic to `$PORT`
+(default 80); `EXPOSE` in a Dockerfile is inert on Vercel and configures
+nothing. The backend resolves its listen port as `PORT` → `MOTIVRA_PORT` →
+`8080` (backend/platform/config.go; `Dockerfile.vercel` ships
+`MOTIVRA_PORT=8080` as the in-image fallback). The Vercel project MUST set
+project env `PORT=8080` so the edge and the listener agree — a mismatch
+produces `FUNCTION_INVOCATION_FAILED` on every container-routed path
+(#122). The backend env contract from `.env.example`
+(Postgres/Redis/NATS/OTel) must also be present on the project, or the
+container boots dependency-less and fails at first use.
+
+**One project, one domain, web + API.** Exactly ONE project on team
+`youngsharksites` builds from this repository: it reads the root
+`vercel.json`, holds `motivra-bfj9.vercel.app`, and serves the Next.js
+frontend and `/v1/*` from the same origin (which keeps the customer app's
+CSP `connect-src 'self'` valid). The duplicate standalone `motivra`
+project must be deleted by the owner: two projects double-fire deployments
+per commit (Hobby-plan daily quota burn) and leave dangling domains.
+Production Branch = `main` (see "Deployment governance" below).
+
+**ADR-level flag (#122 requirement 6).** One container service runs ONE
+`cmd/` binary (`ARG SERVICE` ∈ identity|vehicles|jobs|dispatch), so routing
+all of `/v1/*` to a single container means either (a) a gateway binary or
+(b) one Vercel service per backend with prefixed rewrites. Record the chosen
+option as an ADR addendum BEFORE widening the API surface.
+
+**Post-deploy probes** — after EVERY production deploy, from a clean
+session (no Vercel cookies); all must pass before the deploy is good:
+
+| Probe | Expected |
+| --- | --- |
+| `GET https://motivra-bfj9.vercel.app/` | `200`, app HTML |
+| `GET https://motivra-bfj9.vercel.app/login` | `200` |
+| `GET https://motivra-bfj9.vercel.app/healthz` | `200` JSON from the container |
+| demo-credential login on production | `401` (zero-demo go-live gate, §4b) |
+
 ### Canonical public URL (verified 2026-10-14) and domain hygiene
+
+*(2026-10-22, #122: this domain went `404` on `/`+`/login` and `500` on
+`/healthz` during the Services-routing outage; the routing contract above
+restores it — re-verify with the post-deploy probes after every deploy.)*
 
 The **only live, public, protection-free product surface** is:
 
@@ -486,7 +550,7 @@ root causes are **dashboard-side, not code-side**:
 | `motivra-youngsharksites.vercel.app` | `404 DEPLOYMENT_NOT_FOUND` | domain claimed by project `motivra` (team `youngsharksites`) but no production deployment currently assigned to it |
 | `motivra.vercel.app` | `500` | a DIFFERENT project with the same name on the personal team `roywanyoikes-projects` |
 | `motivra-rho.vercel.app` (and similar guesses) | `404 NOT_FOUND` | unclaimed domain — no project owns it; never existed |
-| `motivra-services-*` | `404` / `FUNCTION_INVOCATION_FAILED` | backend container on Vercel — unsupported target (see above) |
+| `motivra-services-*` | `404` / `FUNCTION_INVOCATION_FAILED` | backend container on Vercel — pre-#122 an unsupported target; since #122 the container serves `/v1/*` + `/healthz` on the canonical domain (see the routing contract above) |
 
 **Quota exhaustion (observed 2026-10-14 ~20:30 UTC):** with two teams
 connected, every commit fires 2-3 deployments (both `motivra`-family
