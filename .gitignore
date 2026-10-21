@@ -25,3 +25,6 @@ coverage.out
 
 # --- We do NOT vendor dependencies ---
 vendor/
+
+# local database dumps (db-backup / purge_demo_data backups) — never commit
+backups/
