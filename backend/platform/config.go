@@ -179,15 +179,19 @@ func Load() Config {
 	}
 }
 
-// Validate aggregates every configuration problem into a single error so an
-// operator sees all missing values at once instead of one boot failure at a
-// time. Rules: database URL required except in test; a configured JWT secret
-// must be at least 32 bytes in staging and production and the historical
-// public development placeholder is refused in every non-test environment;
-// non-test deployments must hold at least one token-verification key source
-// (asymmetric JWKS/public key by default, HS256 behind the explicit
-// migration flag); port must be numeric in range.
-func (c Config) Validate() error {
+// ValidateProblems returns every configuration problem as an individual
+// string so an operator sees all missing values at once instead of one boot
+// failure at a time. Rules: database URL required except in test; a
+// configured JWT secret must be at least 32 bytes in staging and production
+// and the historical public development placeholder is refused in every
+// non-test environment; non-test deployments must hold at least one
+// token-verification key source (asymmetric JWKS/public key by default,
+// HS256 behind the explicit migration flag); port must be numeric in range.
+//
+// Under degraded boot (issue #122, ADR-0008) these problems do not exit the
+// process: they become the "config" /readyz blocker. Validate keeps the
+// aggregated-error form for callers that still want a single error.
+func (c Config) ValidateProblems() []string {
 	var problems []string
 
 	if c.Database.URL == "" && c.App.Env != EnvTest {
@@ -243,6 +247,15 @@ func (c Config) Validate() error {
 		problems = append(problems, "MOTIVRA_AUTH_RATE_LIMIT_RPM must not be negative")
 	}
 
+	return problems
+}
+
+// Validate aggregates every configuration problem into a single error for
+// callers that fail fast (tools, tests). Service binaries use
+// ValidateProblems and degraded boot instead: problems become /readyz
+// blockers, never a process exit (issue #122, ADR-0008).
+func (c Config) Validate() error {
+	problems := c.ValidateProblems()
 	if len(problems) == 0 {
 		return nil
 	}
