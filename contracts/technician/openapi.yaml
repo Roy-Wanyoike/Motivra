@@ -1,0 +1,540 @@
+openapi: 3.0.3
+info:
+  title: Motivra Technician API
+  version: 0.1.0-draft
+  description: |
+
+    **STATUS: DRAFT — Phase 2 backend surface (issues #126 / #166).**
+
+    This contract defines the technician pipeline API that Motivra Tech
+    (apps/technician) is designed against for the graduate-mechanic
+    employment pipeline ("no garage required" track, issue #126). The
+    journey it serves is specified in docs/product/technician-pipeline.md:
+
+        sign-up → skills profile → skills assessment (Inspect template)
+        → verification credential → dispatch eligibility → job earnings
+        → M-Pesa payout
+
+    **No endpoint in this file is implemented yet.** The backend surface
+    lands with the Phase 2 identity child issue (#166) for profile +
+    verification, and the Phase 4 payments child issue (#168) for
+    earnings. Phase 1 ships this contract plus Tech app screens that run
+    in an honest degraded mode (drafts queued offline; reads labelled
+    "backend pending") — never simulated data (repo principle 10).
+
+    Design rules this contract already commits to:
+
+    - AuthN: Bearer access tokens issued by the identity service
+      (asymmetric EdDSA/RS256 with kid, ADR-0007). Every endpoint requires
+      an authenticated caller.
+    - Verification is NOT self-serve: only verifier-role accounts may
+      submit assessment outcomes (POST /v1/technician/verification);
+      every outcome write is appended to the audit trail in the same
+      transaction (fail-closed, ADR-0004).
+    - Money is integer minor units (KES cents) — never floats (repo
+      principle 4). Earnings are read from the payments ledger; the
+      ledger is authoritative and this API never re-derives balances.
+    - PII: profiles carry skills and COARSE service areas only (no
+      precise location history, no ID documents on these paths —
+      docs/PII-HANDLING.md). Assessment records reference Inspections
+      sessions by id; assessment media access is signed-URL based and
+      retention-controlled per PII-HANDLING.md.
+    - Mutations accept an `Idempotency-Key` header: the server applies
+      at-most-once per key (the Tech app outbox replays ops with the
+      same key across retries — apps/technician outbox contract).
+    - Errors are RFC 7807-style `application/problem+json`.
+servers:
+  - url: /
+    description: Same-origin deployment behind the platform gateway.
+tags:
+  - name: profile
+    description: Technician-owned skills profile (trade, specializations, tools, service area).
+  - name: verification
+    description: Skills-assessment outcomes and the resulting verification credential (verifier-role writes, audit-logged).
+  - name: earnings
+    description: Ledger-backed earnings read model (Phase 4 / #168).
+security:
+  - bearerAuth: []
+paths:
+  /v1/technician/profile:
+    post:
+      operationId: submitTechnicianProfile
+      tags: [profile]
+      summary: Create or replace the caller's skills profile
+      description: |
+
+        **Draft (Phase 2, #166).** Stores the authenticated technician's
+        skills profile: trade, specializations, tools owned and coarse
+        service area. One profile per account; resubmission replaces the
+        profile and leaves the verification state untouched. With the
+        `Idempotency-Key` header the server applies at-most-once per key
+        so the offline outbox can replay safely.
+
+        The profile alone does NOT make a technician dispatch-eligible —
+        eligibility requires `verified` status (Phase 3, #167).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileInput'
+      responses:
+        '201':
+          description: Profile stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicianProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/technician/me:
+    get:
+      operationId: getTechnicianMe
+      tags: [profile]
+      summary: The caller's technician projection
+      description: |
+
+        **Draft (Phase 2, #166).** Returns the caller's account projection
+        (identity-owned fields), their skills profile (null until
+        submitted) and their current verification state. This is the
+        Tech app profile screen's primary read.
+      responses:
+        '200':
+          description: The technician projection for the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicianMe'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/technician/verification:
+    post:
+      operationId: submitVerificationOutcome
+      tags: [verification]
+      summary: Record a skills-assessment outcome (verifier only, audit-logged)
+      description: |
+
+        **Draft (Phase 2, #166).** A verifier-role operator submits the
+        outcome of a skills assessment that was administered through the
+        Inspections machinery (template = assessment rubric; session =
+        the assessment run). The write is one transaction: an append-only
+        verification row plus an `identity.technician.verification.*`
+        audit_log entry carrying who verified, when, and against which
+        template/session — a failed audit write fails the request
+        (ADR-0004 fail-closed auditing).
+
+        Authorization: verifier-role accounts only (role set finalized in
+        #166; self-grant is impossible and test-covered). A `pass` sets
+        the technician's status to `verified`; a `fail` leaves
+        `unverified` and records the attempt. Granting while a
+        non-superseded `verified` credential exists conflicts (409);
+        revocation is a new superseding record, never a mutation.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerificationSubmission'
+      responses:
+        '201':
+          description: Outcome recorded; verification row + audit entry written.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/technician/verification-status:
+    get:
+      operationId: getVerificationStatus
+      tags: [verification]
+      summary: The caller's verification status
+      description: |
+
+        **Draft (Phase 2, #166).** Returns the caller's current
+        verification state: `unverified` (no assessment outcome yet),
+        `assessment_pending` (an assessment session is open for the
+        technician in the Inspections context) or `verified` (a live,
+        non-superseded credential exists). Includes the last verification
+        record when one exists — the Tech app shows what was verified,
+        by whom (display name), and when.
+      responses:
+        '200':
+          description: Current verification state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/technician/earnings:
+    get:
+      operationId: listTechnicianEarnings
+      tags: [earnings]
+      summary: The caller's earnings, read from the payments ledger
+      description: |
+
+        **Draft (Phase 4, #168).** Ledger-backed earnings read model: one
+        line per completed job with gross → platform fee → net in integer
+        minor units (KES cents), plus the outstanding balance. Amounts
+        come from the payments ledger (authoritative); this endpoint
+        never computes or caches money. Results are ownership-scoped: a
+        technician sees only their own earnings. The Phase 4 payout path
+        (M-Pesa B2C) builds on these balances — tracked in #168.
+      responses:
+        '200':
+          description: Earnings lines and balance (possibly empty).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EarningsSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+      description: >
+        Client-generated idempotency key (UUIDv4 from the Tech app
+        outbox). The server applies at-most-once per key: replays of a
+        delivered mutation return the original result without a second
+        write. Keys are retained long enough to cover outbox replay
+        windows.
+  responses:
+    Unauthorized:
+      description: Missing, invalid or expired access token.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: Authenticated but the caller's role is not allowed for this operation (e.g. a technician attempting to self-verify).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Resource does not exist (unknown subject technician, template or session).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: State conflict (e.g. granting over a live verified credential).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ValidationError:
+      description: Request body is invalid (missing fields, unknown enum values, malformed ids).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token issued by the identity service — asymmetric
+        EdDSA/RS256 with a kid header (ADR-0007); verifiers check it
+        against the issuer's JWKS. HS256 exists only behind the explicit
+        MOTIVRA_JWT_ALLOW_HS256 migration flag.
+  schemas:
+    Trade:
+      type: string
+      enum:
+        - general_repair
+        - engine
+        - transmission
+        - electrical
+        - brake_systems
+        - suspension_steering
+        - air_conditioning
+        - diagnostics
+        - tyres
+        - body_work
+      description: Primary trade declared by the technician. The list is the dispatch matching vocabulary (Phase 3, #167) — extending it is a contract change.
+    ServiceArea:
+      type: object
+      description: |
+        COARSE service area — deliberately not a location history. Per
+        docs/PII-HANDLING.md, dispatch matching uses coarse service
+        areas; precise or historical geolocation is never stored.
+      required: [area_name, county]
+      properties:
+        area_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: e.g. "Westlands", "Nairobi CBD", "Kilimani".
+        county:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Kenyan county, e.g. "Nairobi".
+    ProfileInput:
+      type: object
+      required: [trade, specializations, service_area]
+      properties:
+        trade:
+          $ref: '#/components/schemas/Trade'
+        specializations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Trade'
+          minItems: 1
+          maxItems: 6
+          description: Secondary skills; must include at least one. May repeat the primary trade only when it is the sole entry.
+          uniqueItems: true
+        tools:
+          type: array
+          description: Tools/equipment the technician owns (free-text labels, e.g. "OBD-II scanner", "torque wrench set"). The "no garage required" track expects most graduates to start with a partial kit — the field is advisory, not a gate.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 80
+          maxItems: 40
+        service_area:
+          $ref: '#/components/schemas/ServiceArea'
+    TechnicianProfile:
+      type: object
+      required: [technician_id, trade, specializations, service_area, updated_at]
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+          description: The profile owner (the caller).
+        trade:
+          $ref: '#/components/schemas/Trade'
+        specializations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Trade'
+        tools:
+          type: array
+          items:
+            type: string
+        service_area:
+          $ref: '#/components/schemas/ServiceArea'
+        updated_at:
+          type: string
+          format: date-time
+    VerificationState:
+      type: string
+      enum: [unverified, assessment_pending, verified]
+      description: |
+        Server-authoritative verification lifecycle:
+        `unverified` → `assessment_pending` (an assessment session is
+        open in the Inspections context) → `verified` (live credential).
+        Revocation writes a superseding record and returns the technician
+        to `unverified`; rows are never mutated (append-only).
+    VerificationOutcome:
+      type: string
+      enum: [pass, fail]
+    VerificationSubmission:
+      type: object
+      required: [technician_id, assessment_template_id, assessment_session_id, outcome]
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+          description: The assessed technician. Must differ from the caller — self-verification is rejected (403) and audit-logged.
+        assessment_template_id:
+          type: string
+          format: uuid
+          description: Inspections template used as the assessment rubric (contracts/inspections).
+        assessment_session_id:
+          type: string
+          format: uuid
+          description: The inspection session that ran the assessment; findings/evidence remain in the Inspections context and are referenced by id only.
+        outcome:
+          $ref: '#/components/schemas/VerificationOutcome'
+        notes:
+          type: string
+          maxLength: 2000
+          description: Verifier free-text rationale. Redacted through platform.RedactFreeText before entering audit metadata — no PII in notes (PII-HANDLING.md).
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Optional credential expiry; null means the credential stands until superseded/revoked.
+    VerificationRecord:
+      type: object
+      description: One append-only verification credential row (tamper-evident, hash-chained like other integrity surfaces).
+      required: [id, technician_id, verifier_id, assessment_template_id, assessment_session_id, outcome, granted_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        technician_id:
+          type: string
+          format: uuid
+        verifier_id:
+          type: string
+          format: uuid
+          description: The acting verifier principal (audit attribution).
+        assessment_template_id:
+          type: string
+          format: uuid
+        assessment_session_id:
+          type: string
+          format: uuid
+        outcome:
+          $ref: '#/components/schemas/VerificationOutcome'
+        notes:
+          type: string
+          nullable: true
+        granted_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        superseded_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: Set when a newer record (revocation or re-grant) replaces this one.
+    VerificationStatus:
+      type: object
+      required: [status, updated_at, verification]
+      properties:
+        status:
+          $ref: '#/components/schemas/VerificationState'
+        updated_at:
+          type: string
+          format: date-time
+        verification:
+          allOf:
+            - $ref: '#/components/schemas/VerificationRecord'
+          nullable: true
+          description: The latest verification record; null while unverified with no recorded attempt.
+    TechnicianMe:
+      type: object
+      required: [id, full_name, roles, profile, verification, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        profile:
+          allOf:
+            - $ref: '#/components/schemas/TechnicianProfile'
+          nullable: true
+        verification:
+          $ref: '#/components/schemas/VerificationStatus'
+        created_at:
+          type: string
+          format: date-time
+    Role:
+      type: string
+      enum: [CUSTOMER, TECHNICIAN, DISPATCHER, GARAGE, FLEET_ADMIN, SUPPORT, FINANCE, ADMIN, SUPER_ADMIN]
+      description: Identity roles today. Whether verification requires a dedicated VERIFIER role or reuses ADMIN is decided in #166; the contract exposes the identity role list either way.
+    EarningsLine:
+      type: object
+      description: One completed job's earnings, straight from the payments ledger.
+      required: [job_id, payment_intent_id, gross_minor, fee_minor, net_minor, currency, status, earned_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        payment_intent_id:
+          type: string
+          format: uuid
+        transaction_id:
+          type: string
+          format: uuid
+          nullable: true
+        gross_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total charged to the customer, integer KES cents.
+        fee_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Platform fee (service fee stream) — always shown to the technician; gross = fee + net.
+        net_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The technician's take — the only amount payout draws against.
+        currency:
+          type: string
+          enum: [KES]
+        status:
+          type: string
+          enum: [ledgered, payout_pending, paid_out]
+          description: ledgered = in the balance; payout_pending = locked by an in-flight payout; paid_out = settled via M-Pesa.
+        earned_at:
+          type: string
+          format: date-time
+    EarningsSummary:
+      type: object
+      required: [technician_id, currency, balance_minor, lines]
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+        currency:
+          type: string
+          enum: [KES]
+        balance_minor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Sum of `ledgered` net amounts — the payout-eligible balance (ledger-authoritative).
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/EarningsLine'
+    Problem:
+      type: object
+      description: RFC 7807-style error (application/problem+json).
+      required: [code, title]
+      properties:
+        code:
+          type: string
+          description: Stable machine code, e.g. validation_failed, unauthorized, conflict, forbidden.
+        title:
+          type: string
+        detail:
+          type: string
+        errors:
+          type: array
+          description: Field-level issues for validation failures.
+          items:
+            type: object
+            required: [field, issue]
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
