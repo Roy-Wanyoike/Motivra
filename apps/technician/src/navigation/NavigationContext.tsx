@@ -17,7 +17,10 @@ import type { ReactNode } from 'react';
 
 export type Route =
   | { name: 'JobList' }
-  | { name: 'JobDetail'; params: { jobId: string } };
+  | { name: 'JobDetail'; params: { jobId: string } }
+  | { name: 'Onboarding' }
+  | { name: 'Profile' }
+  | { name: 'Earnings' };
 
 export interface NavigationApi {
   route: Route;

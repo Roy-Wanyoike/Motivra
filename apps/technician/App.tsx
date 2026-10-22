@@ -1,24 +1,35 @@
 import { useMemo } from 'react';
-import { SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 
 import { NavigationProvider, useNavigation } from './src/navigation/NavigationContext';
 import { JobListScreen } from './src/screens/JobListScreen';
 import { JobDetailScreen } from './src/screens/JobDetailScreen';
+import { OnboardingScreen } from './src/screens/OnboardingScreen';
+import { ProfileScreen } from './src/screens/ProfileScreen';
+import { EarningsScreen } from './src/screens/EarningsScreen';
 import { SyncBanner } from './src/components/SyncBanner';
 import { SyncProvider } from './src/sync/SyncContext';
+import { TechnicianPipelineProvider } from './src/pipeline/TechnicianPipelineContext';
 import { JobStore } from './src/state/job-store';
 import { MOCK_JOBS, SimulatedJobsApi } from './src/mocks/jobs';
 import type { PullFn, PullPage } from './src/sync/api';
+import type { Route } from './src/navigation/NavigationContext';
 
 /**
  * Motivra Tech — app shell.
  *
  * Demo-data policy (production readiness): the simulated API and its mock
  * job data are DEVELOPMENT fixtures. They are wired only when
- * EXPO_PUBLIC_USE_MOCKS=1 is set at build time. Without that flag the app
- * renders an honest "transport not connected" state — no demo jobs, no
- * simulated writes — so a production build can never display or accept
+ * EXPO_PUBLIC_USE_MOCKS=1 is set at build time. Without that flag the jobs
+ * surfaces render an honest "transport not connected" state — no demo jobs,
+ * no simulated writes — so a production build can never display or accept
  * fake data.
+ *
+ * Technician pipeline (issue #126 Phase 1): onboarding wizard, profile and
+ * earnings screens are NOT demo data — they run in both modes, collect real
+ * on-device state (skills-profile drafts queued through the pipeline
+ * outbox) and degrade honestly ("backend pending") for reads. They live in
+ * their own provider, separate from the jobs sync stack.
  *
  * The transport swap for the real API remains a single-file change (see
  * README): replace stubPull/stubDispatcher and the seed call below.
@@ -34,19 +45,30 @@ const stubDispatcher = new SimulatedJobsApi();
 
 const USE_MOCKS = process.env.EXPO_PUBLIC_USE_MOCKS === '1';
 
-function Router({ jobStore }: { jobStore: JobStore }) {
+function Router({ jobStore }: { jobStore: JobStore | null }) {
   const { route } = useNavigation();
   switch (route.name) {
     case 'JobList':
-      return <JobListScreen jobStore={jobStore} />;
+      return jobStore ? <JobListScreen jobStore={jobStore} /> : <TransportNotConnected />;
     case 'JobDetail':
-      return <JobDetailScreen jobId={route.params.jobId} jobStore={jobStore} />;
+      return jobStore ? (
+        <JobDetailScreen jobId={route.params.jobId} jobStore={jobStore} />
+      ) : (
+        <TransportNotConnected />
+      );
+    case 'Onboarding':
+      return <OnboardingScreen />;
+    case 'Profile':
+      return <ProfileScreen />;
+    case 'Earnings':
+      return <EarningsScreen />;
   }
 }
 
 /**
  * Production default: no demo data anywhere. States the missing transport
- * plainly instead of simulating one.
+ * plainly instead of simulating one, and points at the pipeline screens
+ * that DO work on-device in this build.
  */
 function TransportNotConnected() {
   return (
@@ -58,9 +80,42 @@ function TransportNotConnected() {
         work will sync through the outbox.
       </Text>
       <Text style={styles.disconnectedMeta}>
+        Technician pipeline screens (onboarding, profile, earnings) run
+        on-device in this build — switch with the tabs below.
+      </Text>
+      <Text style={styles.disconnectedMeta}>
         Development builds can run the simulated transport with
         EXPO_PUBLIC_USE_MOCKS=1.
       </Text>
+    </View>
+  );
+}
+
+const NAV_TABS: { label: string; route: Route }[] = [
+  { label: 'Jobs', route: { name: 'JobList' } },
+  { label: 'Onboard', route: { name: 'Onboarding' } },
+  { label: 'Profile', route: { name: 'Profile' } },
+  { label: 'Earnings', route: { name: 'Earnings' } },
+];
+
+/** Persistent bottom nav (same tiny typed navigation context, no new library). */
+function PipelineNavRow() {
+  const { route, navigate } = useNavigation();
+  return (
+    <View style={styles.navRow}>
+      {NAV_TABS.map((tab) => {
+        const active = route.name === tab.route.name;
+        return (
+          <Pressable
+            key={tab.route.name}
+            testID={`nav-${tab.route.name}`}
+            style={[styles.navButton, active && styles.navButtonActive]}
+            onPress={() => navigate(tab.route)}
+          >
+            <Text style={[styles.navLabel, active && styles.navLabelActive]}>{tab.label}</Text>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
@@ -74,28 +129,29 @@ export default function App() {
     return store;
   }, []);
 
-  if (!USE_MOCKS) {
-    return (
-      <SafeAreaView style={styles.safe}>
-        <TransportNotConnected />
-        <Text style={styles.footer}>
-          Motivra Tech 0.1.0 — foundation build (no transport connected)
-        </Text>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <NavigationProvider>
-      <SyncProvider dispatcher={stubDispatcher} pull={stubPull} store={jobStore}>
+      <TechnicianPipelineProvider>
         <SafeAreaView style={styles.safe}>
-          <SyncBanner />
-          <Router jobStore={jobStore} />
+          {USE_MOCKS ? (
+            <SyncProvider dispatcher={stubDispatcher} pull={stubPull} store={jobStore}>
+              <SyncBanner />
+              <Router jobStore={jobStore} />
+              <PipelineNavRow />
+            </SyncProvider>
+          ) : (
+            <>
+              <Router jobStore={null} />
+              <PipelineNavRow />
+            </>
+          )}
           <Text style={styles.footer}>
-            Motivra Tech 0.1.0 — foundation build (simulated API, in-memory outbox)
+            {USE_MOCKS
+              ? 'Motivra Tech 0.1.0 — foundation build (simulated API, in-memory outbox)'
+              : 'Motivra Tech 0.1.0 — jobs transport not connected · pipeline runs on-device (Phase 1)'}
           </Text>
         </SafeAreaView>
-      </SyncProvider>
+      </TechnicianPipelineProvider>
     </NavigationProvider>
   );
 }
@@ -112,4 +168,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 12,
   },
+  navRow: {
+    flexDirection: 'row',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#e2e8f0',
+  },
+  navButton: { flex: 1, alignItems: 'center', paddingVertical: 10 },
+  navButtonActive: { backgroundColor: '#f1f5f9' },
+  navLabel: { fontSize: 12, color: '#64748b', fontWeight: '600' },
+  navLabelActive: { color: '#0a3069', fontWeight: '800' },
 });

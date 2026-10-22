@@ -6,7 +6,12 @@ full conflict-resolution protocol of
 [issue #55](https://github.com/Roy-Wanyoike/Motivra/issues/55): the offline outbox,
 the three-way-merge sync reconciler with 409-driven intent re-basing, pure job-state
 guards mirroring `contracts/jobs`, and the first two screens wired through a tiny typed
-navigation context. See `docs/ARCHITECTURE.md` §2 for the context boundaries.
+navigation context. Issue [#126](https://github.com/Roy-Wanyoike/Motivra/issues/126)
+Phase 1 adds the **graduate-mechanic employment pipeline** ("no garage required"
+track): onboarding wizard, profile with verification status, and the earnings screen,
+running against the draft `contracts/technician` API in an honest degraded mode
+(spec: `docs/product/technician-pipeline.md`). See `docs/ARCHITECTURE.md` §2 for the
+context boundaries.
 
 ## Why this exists
 
@@ -36,10 +41,17 @@ not runnable in the delivery sandbox, documented below.
 
 ```
 apps/technician/
-├── App.tsx                     # shell: navigation + sync provider + banner
+├── App.tsx                     # shell: navigation + sync/pipeline providers + bottom nav
 ├── app.json                    # Expo config ("Motivra Tech")
 ├── index.ts                    # registerRootComponent entrypoint
 ├── src/
+│   ├── api/technician.ts       # typed client for contracts/technician (DRAFT) — the only
+│   │                           #   place pipeline API shapes exist; degraded mode when
+│   │                           #   EXPO_PUBLIC_MOTIVRA_API_URL is unset (backend-pending)
+│   ├── pipeline/               # #126 Phase 1: graduate-mechanic pipeline core
+│   │   ├── profile.ts          #   draft type + contract-mirrored validation + payload codec
+│   │   ├── dispatcher.ts       #   OutboxDispatcher: profile ops → contract client
+│   │   └── TechnicianPipelineContext.tsx  # provider: own outbox, verification/earnings reads
 │   ├── domain/job-state.ts     # 18-status transition guards (mirrors backend/jobs)
 │   ├── outbox/                 # CORE: operation schema, storage adapter,
 │   │   ├── types.ts            #   enqueue + drain, exponential backoff + jitter,
@@ -51,13 +63,42 @@ apps/technician/
 │   │   ├── reconciler.ts       #   server-authoritative state handling
 │   │   └── SyncContext.tsx     # React wiring for the sync banner
 │   ├── navigation/NavigationContext.tsx  # tiny typed nav (expo-router upgrade path below)
-│   ├── screens/                # JobListScreen, JobDetailScreen (timeline + actions)
+│   ├── screens/                # JobListScreen, JobDetailScreen (timeline + actions),
+│   │                           #   OnboardingScreen (wizard), ProfileScreen, EarningsScreen
 │   ├── components/SyncBanner.tsx
 │   ├── state/job-store.ts      # in-memory read model (JobLocalStore impl)
-│   ├── mocks/jobs.ts           # stub data + SimulatedJobsApi dispatcher
+│   ├── mocks/jobs.ts           # stub data + SimulatedJobsApi dispatcher (EXPO_PUBLIC_USE_MOCKS only)
 │   └── lib/                    # uuidv4 (expo-crypto backed), JSON value types
-└── tests/                      # vitest: idempotency, backoff, exhaustive guards, sync
+└── tests/                      # vitest: idempotency, backoff, exhaustive guards, sync, pipeline
 ```
+
+## The graduate-mechanic pipeline (issue #126 Phase 1)
+
+Onboarding wizard (sign-up context → skills profile → review/submit), profile screen
+(verification status: `unverified` / `assessment_pending` / `verified` with an honest
+explanation of what the credential means) and the earnings screen. Design rule: the
+screens run in **both** build modes because they carry no demo data —
+
+- **Mutations** (skills profile): validated against the contract mirror
+  (`src/pipeline/profile.ts`), then enqueued as a `technician.profile.submit` op in
+  the pipeline's OWN outbox (`TechnicianPipelineContext`) — same machinery as the
+  jobs outbox (dedupe per idempotency key, exponential backoff, permanent-rejection
+  parking). While no backend is configured the op **stays queued** — the durable
+  on-device draft — and delivers when the Phase 2 identity backend (issue #166)
+  accepts it. Nothing is simulated as "sent".
+- **Reads** (verification status, earnings): through the typed contract client
+  (`src/api/technician.ts`). With no base URL every read reports `backend-pending`
+  and the UI labels its source honestly (`device-default` vs `server`); with a base
+  URL the same client performs real fetches and maps RFC 7807 problem+json errors.
+- **Money**: integer KES minor units end to end (`formatKes`); the app displays
+  ledger amounts, it never computes them.
+
+The API surface these screens consume is **DRAFT 0.1.0**
+(`contracts/technician/openapi.yaml`): `POST /v1/technician/profile`,
+`GET /v1/technician/me`, `POST /v1/technician/verification`,
+`GET /v1/technician/verification-status`, `GET /v1/technician/earnings`. Issues #166
+(Phase 2) and #168 (Phase 4) implement it; journey + phase plan:
+`docs/product/technician-pipeline.md`.
 
 ## The outbox model
 
@@ -127,8 +168,9 @@ matrix test pins the guard to the contract edge list restated independently.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `EXPO_PUBLIC_MOTIVRA_API_URL` | Base URL of the jobs API (planned real transport) | unset → simulated API |
+| `EXPO_PUBLIC_MOTIVRA_API_URL` | Base URL of the API gateway — jobs transport AND the technician pipeline client (`src/api/technician.ts`) | unset → jobs: simulated API (mocks flag only); pipeline: degraded `backend-pending` reads, profile ops stay queued |
 | `EXPO_PUBLIC_MOTIVRA_ACCESS_TOKEN` | Bearer token for local manual testing only | unset |
+| `EXPO_PUBLIC_USE_MOCKS` | Enables the simulated jobs transport + seed data (development only) | unset → no demo data |
 
 No secrets are committed; the real auth flow (identity service HS256 tokens, refresh
 rotation) is a follow-up.
@@ -144,6 +186,8 @@ rotation) is a follow-up.
 | Job state guards | ✅ Real, exhaustively tested | 18×18 matrix vs contract | Server remains authoritative; guard is predictive only |
 | Transport (fetch → jobs API) | 🔴 Stubbed | `OutboxDispatcher`/`PullFn` interfaces; contract-shaped payloads | `SimulatedJobsApi` accepts everything; real fetch client + error mapping is follow-up |
 | Screens (list, detail, timeline, actions) | 🟡 Real code, untested visually | RN components typed under `strict` | No rendering/E2E tests (needs RN test renderer / Maestro) |
+| Pipeline screens (onboarding wizard, profile, earnings — #126 Phase 1) | 🟡 Real code, logic unit-tested, untested visually | Draft validation, payload codec, dispatcher classification, outbox round-trip (20 pipeline tests); contract client performs real fetches when a base URL is set | Reads show honest `backend-pending` states until #166/#168; profile ops queue until Phase 2; no rendering/E2E tests yet |
+| Pipeline contract client (`src/api/technician.ts`) | 🟡 Real, degraded by default | Typed mirror of `contracts/technician` (DRAFT); fetch + problem+json mapping exercised in tests | No live server exists yet; token handling is the manual-testing var only |
 | Navigation | 🟡 Real, tiny | Typed route union + stack | expo-router migration documented below |
 | Connectivity detection | 🔴 Stubbed | Banner reflects last sync outcome | `@react-native-community/netinfo` follow-up |
 | UUIDv4 | ✅ Real | `expo-crypto` `randomUUID` (SDK 57 pin), Web Crypto fallbacks, no weak-randomness path | Node test runtime uses an aliased pure double (`tests/stubs/expo-crypto.ts`) |
