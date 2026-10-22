@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+.vercel/
+.env.local
+
+# Test artifacts
+coverage/
