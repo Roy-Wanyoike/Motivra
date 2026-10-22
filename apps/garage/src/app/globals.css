@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/*
+ * Accessible keyboard focus (issue #24 convention, shared with
+ * apps/customer): a high-contrast outline that only appears for
+ * focus-visible (keyboard) focus, never for pointer focus.
+ */
+:focus-visible {
+  outline: 3px solid #b45309;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/*
+ * Respect users who prefer reduced motion (issue #24 a11y requirement):
+ * collapse animations/transitions and disable smooth scrolling.
+ */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/*
+ * Console scrollbars (issue #123): panels scroll internally on the ops
+ * desk; keep them slim and visible on light backgrounds.
+ */
+.console-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+.console-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.console-scroll::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1;
+  border-radius: 9999px;
+}
+
+.console-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
