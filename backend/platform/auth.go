@@ -13,8 +13,26 @@ import (
 // subsequent log line carries the tenant boundary (ADR-0005 correlation,
 // observability issue #84).
 func AuthMiddleware(v *JWTValidator) func(http.Handler) http.Handler {
+	return AuthMiddlewareFunc(func() *JWTValidator { return v })
+}
+
+// AuthMiddlewareFunc is AuthMiddleware with the validator resolved per
+// request. Degraded boot (issue #122, ADR-0008) binds the validator
+// asynchronously from the wiring loop: before that there is no validator,
+// and a request CARRYING a bearer token must be refused (401) rather than
+// silently passed unauthenticated — "starting" never means "auth bypass".
+func AuthMiddlewareFunc(get func() *JWTValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			v := get()
+			if v == nil {
+				if bearerToken(r) != "" {
+					WriteError(w, ErrUnauthorized("access token cannot be verified while the service is starting"))
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
 			token := bearerToken(r)
 			if token == "" {
 				next.ServeHTTP(w, r)
