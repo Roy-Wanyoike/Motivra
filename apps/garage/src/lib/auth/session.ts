@@ -11,6 +11,7 @@
 
 import { cookies } from "next/headers";
 import { garageConfig } from "@/lib/config";
+import { withBasePath } from "@/lib/base-path";
 import { verifyAccessToken, type AccessClaims } from "./claims";
 import { isGarageStaff } from "./staff";
 
@@ -56,7 +57,10 @@ export function refreshCookieSpec(token: string, secure: boolean): CookieSpec {
   return {
     name: REFRESH_COOKIE,
     value: token,
-    path: "/api/auth",
+    // Cookie Path is matched against the raw browser URL, so under the
+    // deployment base path (issue #195) it must carry the prefix or the
+    // browser would never send the refresh cookie back to /api/auth/*.
+    path: withBasePath("/api/auth"),
     maxAge: REFRESH_COOKIE_MAX_AGE,
     ...baseCookie(secure),
   };

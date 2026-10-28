@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { garageConfig } from "@/lib/config";
+import { withBasePath } from "@/lib/base-path";
 import { upstreamFetch } from "@/lib/api/upstream";
 import {
   ACCESS_COOKIE,
@@ -38,7 +39,7 @@ export async function POST(request: NextRequest) {
   const secure = cookieSecure();
   const response = new NextResponse(null, { status: 204 });
   response.cookies.set(clearedCookieSpec(ACCESS_COOKIE, "/", secure));
-  response.cookies.set(clearedCookieSpec(REFRESH_COOKIE, "/api/auth", secure));
+  response.cookies.set(clearedCookieSpec(REFRESH_COOKIE, withBasePath("/api/auth"), secure));
 
   // Actor is the presented refresh cookie's owner only insofar as we know:
   // logout carries no access token claim, so the actor is recorded as the

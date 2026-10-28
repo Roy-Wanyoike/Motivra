@@ -2,12 +2,18 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "customer": { "root": "apps/customer" },
+    "command": { "root": "apps/command" },
+    "garage": { "root": "apps/garage" },
     "app": { "root": ".", "runtime": "container", "entrypoint": "Dockerfile.vercel" }
   },
   "rewrites": [
     { "source": "/v1/(.*)", "destination": { "service": "app" } },
     { "source": "/healthz", "destination": { "service": "app" } },
     { "source": "/readyz", "destination": { "service": "app" } },
+    { "source": "/command", "destination": { "service": "command" } },
+    { "source": "/command/(.*)", "destination": { "service": "command" } },
+    { "source": "/garage", "destination": { "service": "garage" } },
+    { "source": "/garage/(.*)", "destination": { "service": "garage" } },
     { "source": "/(.*)", "destination": { "service": "customer" } }
   ],
   "headers": [
