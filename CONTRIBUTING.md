@@ -4,12 +4,30 @@ Thanks for your interest in the build. The process is deliberately opinionated �
 
 ## The flow
 
+The repository runs a **two-branch model**, with both branches protected by
+GitHub branch-protection rulesets: `dev-branch-protection` (ruleset ID
+26035216, applies to `refs/heads/dev`) and `main-branch-protection` (ruleset
+ID 22533278, applies to the default branch, `main`). Both rulesets require a
+pull request, block branch deletion and non-fast-forward pushes, require
+extra approval for unattributed changes, and have no bypass actors — never
+push directly to `dev` or `main`.
+
 1. **Claim or open an issue.** Every meaningful change starts as a GitHub issue using the templates (feature / architecture / spike). Check the [ideas board](docs/IDEAS.md) for context.
-2. **Branch from `main`.** Naming: `<domain>/<topic>` (e.g. `dispatch/scoring`). One owner per branch.
+2. **Branch from `dev`.** Exactly two branches are permanent: `dev` (integration) and `main` (production). Everything else is temporary and originates from `dev`. Naming: `feature/<issue>-<slug>` or `fix/<issue>-<slug>` (e.g. `feature/203-offline-outbox`). One owner per branch.
 3. **Work inside your ownership zone.** Bounded contexts own their tables, events and workflows. Cross-zone changes need a dependency request on the owning issue.
-4. **Open a PR with the template filled.** Problem, solution, architecture/DB/API/event impact, security, testing, observability, rollback. No vague PRs.
+4. **Open a PR targeting `dev`.** Every PR — feature, fix, dependency bump, docs — targets `dev`, never `main`. Fill the template: problem, solution, architecture/DB/API/event impact, security, testing, observability, rollback. No vague PRs.
 5. **Pass CI gates.** Build, lint, tests, security scan, migration validation, coverage.
-6. **Review and merge.** The PR references its issue; merging auto-closes it.
+6. **Review and merge.** The PR references its issue; merging auto-closes it. Temporary branches may be deleted after merge; `dev` and `main` are never deleted.
+7. **Release.** A release is an explicitly authorized release PR from `dev` to `main`, opened only after integration validation on `dev` has passed. Vercel deploys production from `main` only — see the [runbook](docs/RUNBOOK.md) §6.
+
+### PR checklist
+
+- [ ] PR targets `dev` (an authorized release PR to `main` is the only exception)
+- [ ] References its issue; no unrelated files modified
+- [ ] CI gates pass
+- [ ] Documentation reflects the actual implementation — verified, never aspirational text
+- [ ] Links, branch names and IDs cited in docs are correct against the live repository
+- [ ] Every commit carries a DCO sign-off (`git commit -s`)
 
 ## Non-negotiables
 

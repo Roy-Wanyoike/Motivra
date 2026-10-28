@@ -571,7 +571,56 @@ session (no Vercel cookies); all must pass before the deploy is good:
 | `GET https://motivra-bfj9.vercel.app/` | `200`, app HTML |
 | `GET https://motivra-bfj9.vercel.app/login` | `200` |
 | `GET https://motivra-bfj9.vercel.app/healthz` | `200` JSON from the container |
+| `GET https://motivra-bfj9.vercel.app/readyz` | `200` (full readiness: config + database + migrations green) |
 | demo-credential login on production | `401` (zero-demo go-live gate, §4b) |
+
+### Degraded boot contract (issue #122, ADR-0008)
+
+Since ADR-0008, the four container-deployed services (identity, vehicles,
+jobs, dispatch) **never exit because of missing configuration or
+infrastructure**. The process binds its listener first and serves
+`/healthz` (dependency-free liveness, always `200`); configuration and
+dependency wiring then runs in a background loop with exponential backoff.
+Failure modes surface on `/readyz` and on domain routes:
+
+| State | `/healthz` | `/readyz` | Domain routes (`/v1/*`) |
+| --- | --- | --- | --- |
+| Fully wired | `200` | `200` | real API |
+| Dependency unreachable (DB down, NATS set-but-unreachable) | `200` | `503`, `failed` lists check NAMES (e.g. `database`) | `503` `problem+json` (`code: not_ready`) |
+| Configuration invalid (missing DB URL, no verifier key source in production, placeholder secret) | `200` | `503`, `failed` lists `config` (permanent — clears only on redeploy with corrected env) | `503` `problem+json` |
+| Observability setup failed (OTel collector unreachable) | `200` | `200` (degradation, NOT a blocker) | real API; `boot_degraded` log line |
+
+Info-leak posture: unauthenticated `/readyz` bodies carry **check names
+only** — never raw reasons (error strings leak DSNs and host topology,
+hardening #81). Full reasons go to the service log (`boot_blocker` lines)
+and appear in the `reasons` field of `/readyz` responses for bearers with
+operator claims (ADMIN / SUPER_ADMIN, identity RBAC matrix).
+`payments` and `inspections` mains keep the
+fail-fast posture for now — they are outside the current container
+topology (`ARG SERVICE` ∈ identity|vehicles|jobs|dispatch) and gain the
+contract when they join it.
+
+**Making `/readyz` green on Vercel — project environment contract.** With
+the routing contract above satisfied (rewrites + `PORT=8080`), the
+container still reports `503` until the project carries the backend env
+contract (see `.env.example`):
+
+| Project env var | Effect on readiness |
+| --- | --- |
+| `PORT=8080` | edge/listener agreement — without it requests 500 before Go code runs |
+| `MOTIVRA_ENV=production` | strict secret rules; selects the verifier-key requirement |
+| `MOTIVRA_DATABASE_URL` | libpq URL (e.g. Neon/Supabase). Missing → permanent `config` blocker; set-but-unreachable → `database` blocker |
+| `MOTIVRA_JWT_PRIVATE_KEY_FILE` (identity) or `MOTIVRA_JWT_PUBLIC_KEY_FILE` / `MOTIVRA_JWT_JWKS_URL` (verifiers), or `MOTIVRA_JWT_ALLOW_HS256=1` + `MOTIVRA_JWT_SECRET` ≥32 bytes (documented migration window) | missing → permanent `config` blocker in production (ADR-0007) |
+| `MOTIVRA_REDIS_URL`, `MOTIVRA_NATS_URL`, OTel vars | optional — unset is a documented degradation, never a blocker |
+
+**Owner checklist for a canonical deployment** (also tracked on #122):
+(1) keep exactly ONE Vercel project building from this repo on team
+`youngsharksites` — delete duplicates (standalone `motivra`,
+`motivra-blue`, and any newer copies); duplicate projects double-fire
+deployments per commit and leave dangling 404 domains; (2) attach the
+canonical domain to that project; (3) Production Branch = `main`; (4) set
+the project environment table above; (5) Redeploy from `main`; (6) run
+the post-deploy probes including `/readyz`.
 
 ### Canonical public URL (verified 2026-10-14) and domain hygiene
 
@@ -650,6 +699,38 @@ PostGIS required; Redis-backed distributed rate limiting active when
 `MOTIVRA_REDIS_URL` is set (issue #87); six services run their own
 migration chains at boot (identity, vehicles, jobs, dispatch, payments,
 inspections); Temporal intentionally absent from the stack yet.
+
+### Branch governance — two-branch model and protected rulesets (2026-10-28, issue #187)
+
+Repository branch policy as implemented, verified against the GitHub API
+(rulesets and branch listing) on 2026-10-28:
+
+- Exactly two permanent branches: **`dev` (integration)** and
+  **`main` (production)**. `dev` was cut from `main` at c1ebb2e and is the
+  merge target for all PRs; `main` is the production/deploy branch.
+- Both branches are protected by branch-protection rulesets with the same
+  rule shape: `dev-branch-protection` (ruleset ID **26035216**, scope
+  `refs/heads/dev`) and `main-branch-protection` (ruleset ID **22533278**,
+  scope = the default branch, `main`). Each requires a pull request to
+  merge, blocks branch deletion and non-fast-forward (force) pushes,
+  requires extra approval for unattributed (non-member-authored) changes,
+  and defines no bypass actors — protection cannot be sidestepped by any
+  role.
+- **All PRs target `dev`** — features, fixes, docs and dependency bumps.
+  Dependabot is pinned to `dev` via `target-branch: "dev"` in
+  `.github/dependabot.yml` (2026-10-28).
+- **A release is an explicitly authorized release PR from `dev` to `main`**,
+  opened only after integration validation on `dev` passes. Direct pushes
+  to either branch are impossible (rulesets above); preview promotions via
+  the Vercel dashboard are forbidden (see "Deployment governance" above).
+  `dev` is integration only and never serves production traffic.
+- **Production deploy signal:** Vercel production commit statuses on `main`
+  carry the contexts `Vercel – motivra` and `Vercel – motivra-wesk`
+  (verified on commit c1ebb2e, 2026-10-28). A merge to `main` without a
+  green production status from these contexts is not a completed release.
+- **Temporary branches** (`feature/*`, `fix/*`, `dependabot/*`) may be
+  deleted after their PR merges; `dev` and `main` are permanent — deletion
+  is blocked by both rulesets and must never be requested.
 
 ---
 
@@ -769,9 +850,9 @@ audit_log review before notifying.
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| Service exits: `MOTIVRA_DATABASE_URL is required` | Env var not set — every service (incl. dispatch, by validation) needs it outside `test` env. |
-| Service exits: `invalid configuration: ... JWT_SECRET ...` | Secret missing or `< 32 bytes` with `MOTIVRA_ENV=production`. |
-| `readyz` returns 503 with `"failed":{"database":...}` | Postgres down or wrong URL; check `docker compose -f docker-compose.app.yml ps` and logs. |
+| Container serves `503 not_ready` with `failed:["config"]` | Environment contract incomplete (missing DB URL / verifier keys in production) — see the §6 degraded-boot env table; fix project env, redeploy. |
+| Container serves `503 not_ready` with `failed:["database"]` | `MOTIVRA_DATABASE_URL` set but Postgres unreachable — check the DB provider status/network allow-list; the wiring loop retries with backoff, no restart needed. |
+| Vercel `500 FUNCTION_INVOCATION_FAILED` on `/healthz` | Pre-ADR-0008 image (deploy before the degraded-boot fix) or port mismatch — confirm the deploy includes ADR-0008 and project env `PORT=8080`. |
 | `401 invalid token` between services | All services must share the same `MOTIVRA_JWT_SECRET` + issuer + audience (compose defaults align them). |
 | Login returns validation error | Password policy: min 10 chars (identity `MinPasswordLength`). |
 | VIN rejected on register | `vin_normalized` uniqueness + identity-service VIN validation (`backend/vehicles/vin.go`); seeded VINs are reserved. |

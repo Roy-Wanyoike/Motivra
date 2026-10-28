@@ -199,7 +199,7 @@ flowchart LR
 
 ```text
 Issue (typed: feature / bug / architecture / infra / security / docs / tech-debt / spike)
-  → Branch (<domain>/<topic> — one owner per branch)
+  → Branch from dev (feature/<issue>-<slug> / fix/<issue>-<slug> — one owner per branch)
   → Implementation + tests (unit, integration, contract, E2E)
   → PR (template-enforced: impact, security, rollback, observability)
   → CI quality gates (build, lint, tests, security scan, migration validation, coverage)
@@ -207,6 +207,16 @@ Issue (typed: feature / bug / architecture / infra / security / docs / tech-debt
 ```
 
 Between waves, the project runs **integration windows**: feature development pauses for end-to-end, migration, security and load validation before the next wave unlocks. Critical flows — the customer-to-payment happy path — must hold full E2E coverage.
+
+### Deployment
+
+Two permanent branches, both protected by branch-protection rulesets (`dev-branch-protection` — ID 26035216 — and `main-branch-protection` — ID 22533278), no direct pushes to either:
+
+- **`dev` — integration.** Every PR (feature, fix, dependency, docs) targets `dev` and lands here after review. Dependabot opens its PRs against `dev`.
+- **`main` — production.** Vercel deploys production from `main` only (production commit statuses on `main`: `Vercel – motivra`, `Vercel – motivra-wesk`). `dev` builds previews, never production.
+- **Release flow:** an explicitly authorized release PR from `dev` → `main` after integration validation. Nothing else promotes code to production.
+
+The deployment contract, post-deploy probes and Vercel dashboard settings are documented in the [runbook](docs/RUNBOOK.md) §6.
 
 ### What you could own
 
