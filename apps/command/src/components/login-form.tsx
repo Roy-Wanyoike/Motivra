@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { withBasePath } from "@/lib/base-path";
 
 /*
  * Staff login form. Credentials go to Command's own /api/auth/login route
@@ -32,7 +33,7 @@ export function LoginForm() {
     const password = String(data.get("password") ?? "");
     setState({ kind: "busy" });
     try {
-      const response = await fetch("/api/auth/login", {
+      const response = await fetch(withBasePath("/api/auth/login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),

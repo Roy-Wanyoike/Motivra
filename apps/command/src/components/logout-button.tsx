@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /*
  * Sign-out control: revokes the identity session server-side (best effort)
@@ -12,13 +13,13 @@ export function LogoutButton() {
   async function signOut() {
     setBusy(true);
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
+      await fetch(withBasePath("/api/auth/logout"), { method: "POST" });
     } catch {
       // Network failure must not trap the operator on the console — the
       // cookies are cleared by the handler regardless; if this request never
       // reaches the server, navigating to /login still ends the screen share.
     } finally {
-      window.location.assign("/login");
+      window.location.assign(withBasePath("/login"));
     }
   }
 

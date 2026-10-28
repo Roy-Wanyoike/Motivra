@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { commandConfig } from "@/lib/config";
+import { withBasePath } from "@/lib/base-path";
 import { upstreamFetch, UpstreamError } from "@/lib/api/upstream";
 import { problemResponse } from "@/lib/api/problem";
 import {
@@ -53,7 +54,7 @@ export async function POST(request: NextRequest) {
       const secure = cookieSecure();
       const response = problemResponse(401, "session_expired", "Command session expired");
       response.cookies.set(clearedCookieSpec(ACCESS_COOKIE, "/", secure));
-      response.cookies.set(clearedCookieSpec(REFRESH_COOKIE, "/api/auth", secure));
+      response.cookies.set(clearedCookieSpec(REFRESH_COOKIE, withBasePath("/api/auth"), secure));
       return response;
     }
     if (error instanceof UpstreamError && error.status === 0) {

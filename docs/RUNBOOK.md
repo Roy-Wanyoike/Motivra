@@ -732,6 +732,85 @@ Repository branch policy as implemented, verified against the GitHub API
   deleted after their PR merges; `dev` and `main` are permanent — deletion
   is blocked by both rulesets and must never be requested.
 
+### Staff console routing contract (issue #195)
+
+*(2026-10-28, #195: extends the #122 contract above with two more services.
+Before #195 the catch-all swallowed `/command` and `/garage` — both staff
+consoles shipped via #129 and #188 but 404'd in production.)*
+
+The root `vercel.json` now routes FOUR services. The staff consoles are
+**path-prefix routed** on the same single production domain — one domain,
+one Vercel project, four services:
+
+| Path prefix | Service | App | Base path (`next.config.ts`) |
+| --- | --- | --- | --- |
+| `/` (catch-all) | `customer` | `apps/customer` (Next.js) | — (served at root) |
+| `/command` (+ `/command/(.*)`) | `command` | `apps/command` (Next.js) | `basePath: "/command"` |
+| `/garage` (+ `/garage/(.*)`) | `garage` | `apps/garage` (Next.js) | `basePath: "/garage"` |
+| `/v1/(.*)`, `/healthz`, `/readyz` | `app` | backend container (`Dockerfile.vercel`) | — |
+
+**Rewrite order rule (unchanged from #122, now with more surface to break):**
+the specific prefixes sit ABOVE the `/(.*)` catch-all, and the catch-all
+MUST stay the LAST rewrite. A rewrite appended after the catch-all is dead
+code (the catch-all swallows it) and silently re-404s the console — the
+exact outage shape #195 fixes. Treat rewrite ORDER as deploy-critical (#99,
+#122).
+
+**The bare-prefix entries are required.** `/command` (no trailing slash)
+does not match the `/command/(.*)` pattern, so each console carries its own
+exact-match rewrite (`/command`, `/garage`) in addition to the wildcard
+one. Both must exist or the bare URL 404s while the slashed one works (or
+vice versa).
+
+**Path-prefix + basePath model.** The Vercel rewrites forward the ORIGINAL
+path (the service receives `/command/...`), so each Next.js console sets
+`basePath` to its own prefix in `next.config.ts` — pages, `_next` assets,
+`Link`/`router`/`redirect` are all re-rooted under the prefix by Next.js
+itself. What basePath does NOT cover (and what #195 had to fix by hand):
+raw `fetch()` calls from client components, `window.location.assign`,
+native `<form action>` targets, and cookie `Path` attributes — these see
+the raw URL, so they are prefixed via `NEXT_PUBLIC_BASE_PATH`
+(`src/lib/base-path.ts`, injected by `next.config.ts` `env`). The refresh
+cookie's `Path` must carry the prefix or the browser never sends it back to
+`/api/auth/*` and keep-alive rotation dies silently.
+
+**Auth gating unchanged.** The consoles remain deny-by-default: the proxy
+(public surface = `/login` + `/api/auth/*` only) and the per-page guards
+run under the base path as before; CSP and security headers are untouched.
+Routing a path to a console service does NOT bypass any of it.
+
+**`apps/technician` is intentionally NOT routed.** It is the Expo/mobile
+app (issue #120) — it ships through app stores / Expo dev clients, not
+through the web edge, and has no `basePath` or Vercel service entry. Do
+not "fix" its absence from `vercel.json`.
+
+**Dev note:** with `basePath` set unconditionally, `npm run dev` for these
+two consoles now serves under the prefix too (`http://localhost:3000/command`,
+`http://localhost:3000/garage`) — dev and prod share one URL shape by
+design.
+
+**Post-deploy probes for the consoles** (add to the #122 probe list, run
+from a clean session):
+
+| Probe | Expected |
+| --- | --- |
+| `GET https://<production-domain>/command` | `307` → `/command/login` for anonymous callers (never `404`) |
+| `GET https://<production-domain>/command/login` | `200`, Command login HTML with CSP headers |
+| `GET https://<production-domain>/garage` | `307` → `/garage/login` for anonymous callers (never `404`) |
+| `GET https://<production-domain>/garage/login` | `200`, Garage login HTML with CSP headers |
+| `GET https://<production-domain>/` | still `200` — the customer catch-all is unaffected |
+
+**Next 16.3.8 nuance worth knowing before debugging the consoles.** With
+`basePath` set, Next auto-prefixes the proxy `matcher` with the base path
+at build time, and the compiled pattern requires at least one segment
+after the prefix (`/command/<something>`) — the BARE root (`/command`,
+no trailing slash) skips the proxy and is redirected by the per-page
+guard instead (same deny-by-default outcome, no `?next=` round-trip).
+Every real path (`/command/login`, `/command/api/auth/*`, deeper pages)
+hits the proxy with the base path already stripped, so `guard.ts`'s
+`PUBLIC_PATH_PREFIXES` and the RBAC matrix work unchanged. Verified
+locally on Next 16.3.8 (middleware-manifest regexp + live probes).
+
 ---
 
 ## 7. Backup & DR
