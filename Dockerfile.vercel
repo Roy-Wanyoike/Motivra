@@ -6,15 +6,20 @@
 # docker-compose/VPS contract and is intentionally untouched.
 #
 # Build a service with:
-#   docker build -f Dockerfile.vercel --build-arg SERVICE=identity -t motivra-identity:vercel .
+#   docker build -f Dockerfile.vercel --build-arg SERVICE=gateway -t motivra-gateway:vercel .
 #
 # SERVICE selects the cmd/<SERVICE> entrypoint. Allowed values are exactly
 # the deployable services in cmd/ (ADR-0001: "cmd/<service>/main.go — one
-# entrypoint per deployable service"): identity, vehicles, jobs, dispatch.
-# NOTE (ADR-level flag, issue #122 requirement 6): one container runs ONE
-# binary, so all /v1/* rewrites hit a single service — a gateway binary or
-# per-service rewrites must be decided before the API surface widens.
+# entrypoint per deployable service"): gateway, identity, vehicles, jobs,
+# dispatch.
 #
+# Since ADR-0009 (issue #202) the DEFAULT — and the value the vercel.json
+# "app" service builds — is `gateway`: the API gateway binary that mounts
+# EVERY domain's router under /v1 in one process, so the single-container
+# topology actually serves the whole API surface (the single-domain
+# container it replaces served /v1/* from identity only). The per-service
+# values remain for targeted container builds; the root Dockerfile keeps
+# its own compose contract.
 # Env contract: backend/platform/config.go (see .env.example).
 
 # --- Build stage -------------------------------------------------------------
@@ -22,13 +27,13 @@
 # Bump both together.
 FROM golang:1.27.1-alpine AS build
 
-ARG SERVICE=identity
+ARG SERVICE=gateway
 
 # Fail fast (and loudly) on unknown services instead of silently producing
 # a broken image; also rules out path traversal via --build-arg.
 RUN case "$SERVICE" in \
-      identity|vehicles|jobs|dispatch) ;; \
-      *) echo "ERROR: SERVICE must be one of: identity, vehicles, jobs, dispatch (got '$SERVICE')" >&2; exit 1 ;; \
+      gateway|identity|vehicles|jobs|dispatch) ;; \
+      *) echo "ERROR: SERVICE must be one of: gateway, identity, vehicles, jobs, dispatch (got '$SERVICE')" >&2; exit 1 ;; \
     esac
 
 WORKDIR /src
