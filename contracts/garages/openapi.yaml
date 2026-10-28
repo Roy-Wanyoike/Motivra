@@ -1,0 +1,181 @@
+openapi: 3.0.3
+info:
+  title: Motivra Garages API
+  version: 1.0.0
+  description: |
+    Partner-garage surface: declared service capacity, and (from issue
+    #169) the appointment calendar tied to service requests.
+
+    Capacity is one record per garage tenant: bays, operating hours and
+    technician slots the garage declares so Motivra scheduling and dispatch
+    can respect it. Downstream consumers (appointments conflict logic,
+    dispatch scoring) read the authoritative row through the garages domain
+    service API and subscribe to `capacity.updated.v1` — the HTTP endpoint
+    below serves the garage's own console.
+
+    All endpoints require a Bearer access token issued by the identity
+    service. Errors are RFC 7807-style `application/problem+json`.
+
+servers:
+  - url: /
+tags:
+  - name: capacity
+    description: Declared service capacity of the caller's own garage
+security:
+  - bearerAuth: []
+paths:
+  /v1/garage/capacity:
+    get:
+      operationId: getGarageCapacity
+      summary: Read this garage's declared capacity
+      description: |
+        Returns the caller's own tenant's capacity record. The tenant is
+        derived EXCLUSIVELY from the validated token's `tenant_id` claim —
+        never from client input. A GARAGE token without a `tenant_id` claim
+        fails closed (403); a malformed claim fails closed (401).
+
+        A tenant that has never written a capacity row gets the documented
+        defaults: zero declared capacity (`bays: 0`, `technician_slots: 0`)
+        inside the conventional service day (`08:00`–`18:00`), with
+        `updated_at`/`updated_by` omitted.
+      tags: [capacity]
+      responses:
+        '200':
+          description: The tenant's capacity record (or the documented defaults).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capacity'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      operationId: updateGarageCapacity
+      summary: Write this garage's declared capacity
+      description: |
+        Replaces the caller's own tenant's capacity record (single row per
+        tenant, upsert). All four fields are required — the write is whole-
+        record, so a dropped field can never silently zero declared
+        capacity. Validation is server-side, never trusted from the client:
+        `bays >= 0`, `technician_slots >= 0`, both times are `HH:MM` and
+        `opening_time` < `closing_time` (also enforced by CHECK constraints
+        at the database level). Success publishes `capacity.updated.v1`.
+      tags: [capacity]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CapacityInput'
+      responses:
+        '200':
+          description: The stored capacity record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capacity'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+components:
+  responses:
+    Unauthorized:
+      description: Missing, invalid or expired access token.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: |
+        Authenticated but not permitted: the role is not GARAGE, or the
+        token carries no `tenant_id` claim (garage endpoints operate on the
+        caller's own tenant only).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Request body is invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    CapacityInput:
+      type: object
+      required: [bays, opening_time, closing_time, technician_slots]
+      properties:
+        bays:
+          type: integer
+          minimum: 0
+          description: Service lanes available for booked work.
+        opening_time:
+          type: string
+          pattern: '^([01]\d|2[0-3]):[0-5]\d$'
+          example: '08:00'
+          description: Operating-hours start, wall clock `HH:MM`.
+        closing_time:
+          type: string
+          pattern: '^([01]\d|2[0-3]):[0-5]\d$'
+          example: '18:00'
+          description: Operating-hours end, wall clock `HH:MM`; must be after opening_time.
+        technician_slots:
+          type: integer
+          minimum: 0
+          description: Parallel technician capacity per slot.
+    Capacity:
+      type: object
+      properties:
+        bays:
+          type: integer
+          minimum: 0
+        opening_time:
+          type: string
+          example: '08:00'
+        closing_time:
+          type: string
+          example: '18:00'
+        technician_slots:
+          type: integer
+          minimum: 0
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Omitted while the tenant has never written a row.
+        updated_by:
+          type: string
+          format: uuid
+          nullable: true
+          description: Principal that last wrote the record; omitted while unwritten.
+    Error:
+      type: object
+      description: RFC 7807-style problem document (application/problem+json).
+      required: [code, title]
+      properties:
+        code:
+          type: string
+          example: validation_failed
+        title:
+          type: string
+          example: The request is invalid
+        detail:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              issue:
+                type: string

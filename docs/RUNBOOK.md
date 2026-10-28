@@ -811,6 +811,51 @@ hits the proxy with the base path already stripped, so `guard.ts`'s
 `PUBLIC_PATH_PREFIXES` and the RBAC matrix work unchanged. Verified
 locally on Next 16.3.8 (middleware-manifest regexp + live probes).
 
+### Gateway contract (issue #202, ADR-0009)
+
+Since ADR-0009 the container topology's `app` service builds the **API
+gateway** (`cmd/gateway`; `Dockerfile.vercel` `ARG SERVICE=gateway`, the
+new default): ONE process that mounts every domain's router under `/v1`, so
+the single-container topology serves the whole API surface (the
+single-domain container it replaced served `/v1/*` from the identity domain
+only — vehicles/jobs/dispatch were unreachable despite being merged).
+Boot, `/healthz` and `/readyz` semantics are the ADR-0008 contract
+unchanged (bind first; liveness dependency-free; blockers machine-readable;
+domain routes 503 `problem+json` until wiring lands). The prefix map —
+registered verbatim by each domain's own `Routes` constructor (no routing
+logic is forked, no auth middleware duplicated):
+
+| Prefix | Domain |
+| --- | --- |
+| `/v1/auth/*`, `/v1/users/*`, `/v1/admin/*`, `/.well-known/jwks.json` | identity |
+| `/v1/vehicles/*` | vehicles |
+| `/v1/requests/*`, `/v1/jobs/*` | jobs |
+| `/v1/garage/capacity` | garages (rides the jobs process — #170) |
+| `/v1/dispatch/*` | dispatch |
+| `/v1/payments/*` | payments |
+| `/v1/inspections/*` | inspections |
+| unknown `/v1/*` | `404 application/problem+json` (code `not_found`) |
+
+**Topology and dependencies.** One PostgreSQL pool serves all domains (the
+cmd/jobs jobs+garages precedent); all six per-domain migration chains
+(identity, vehicles, jobs, garages, payments, inspections) are applied by
+the wiring loop (ADR-0003 chains stay separate). The database is a hard
+dependency of the whole process — missing/unreachable ⇒ `database` blocker
+on `/readyz`, every domain route 503 until it clears. The gateway hosts the
+identity ISSUER, so the Vercel project environment must carry the issuer
+variables: `MOTIVRA_JWT_SECRET` (opaque-token digest key, ADR-0004) and
+`MOTIVRA_JWT_PRIVATE_KEY_FILE` (ADR-0007) — plus the payments contract
+variables (backend/payments/README.md; `MOTIVRA_PAYMENTS_WEBHOOK_SECRET`
+is required outside development/test). Missing values are permanent
+`config` blockers surfaced on `/readyz`, per the degraded-boot table above.
+
+**Compose unchanged.** The root `Dockerfile` (the docker-compose/VPS
+contract) is intentionally untouched: compose keeps running the per-domain
+binaries it runs today. The gateway is the CONTAINER-topology
+(`Dockerfile.vercel`) entrypoint; the per-service `SERVICE` values
+(identity | vehicles | jobs | dispatch) remain available for targeted
+container builds.
+
 ---
 
 ## 7. Backup & DR
