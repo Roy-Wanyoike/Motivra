@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { JOB_STATUSES, type JobRecord, type JobStatus } from "@/lib/api/jobs";
+import { withBasePath } from "@/lib/base-path";
 import { maskCustomerId, maskIdentifier, maskTechnicianId } from "@/lib/pii/mask";
 import { formatTimestamp } from "@/lib/format";
 import { StatusBadge } from "@/components/status-badge";
@@ -50,7 +51,9 @@ export function JobBoardPanel(props: JobBoardPanelProps) {
     >
       <form
         method="get"
-        action="/"
+        // Raw form actions are not basePath-aware (issue #195): prefix the
+        // in-console target so the filter round-trip stays on this console.
+        action={withBasePath("/")}
         aria-label="Job board filters"
         className="flex flex-wrap items-end gap-3 rounded-md border border-slate-200 bg-slate-50 p-3"
       >

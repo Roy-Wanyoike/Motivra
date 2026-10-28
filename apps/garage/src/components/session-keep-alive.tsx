@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 /*
  * Session keep-alive: quietly rotates the short-lived access token via the
@@ -14,14 +15,14 @@ export function SessionKeepAlive({ intervalSeconds }: { intervalSeconds: number 
     let cancelled = false;
     const timer = setInterval(async () => {
       try {
-        const response = await fetch("/api/auth/refresh", { method: "POST" });
+        const response = await fetch(withBasePath("/api/auth/refresh"), { method: "POST" });
         if (!cancelled && !response.ok && response.status !== 401) {
           // 401 means the refresh session is gone → re-auth; anything else
           // (blip) is survivable and retried next tick.
           return;
         }
         if (!cancelled && response.status === 401) {
-          window.location.assign("/login");
+          window.location.assign(withBasePath("/login"));
         }
       } catch {
         // Network blip — retry next tick.

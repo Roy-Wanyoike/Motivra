@@ -18,6 +18,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { commandConfig } from "@/lib/config";
+import { withBasePath } from "@/lib/base-path";
 import { verifyAccessToken } from "@/lib/auth/claims";
 import { cookieSecure, ACCESS_COOKIE, clearedCookieSpec, REFRESH_COOKIE } from "@/lib/auth/session";
 import { decideRoute, forbiddenDocument, type SessionState } from "@/lib/auth/guard";
@@ -78,7 +79,7 @@ export default async function proxy(request: NextRequest) {
   if (present && !session.valid) {
     const secure = cookieSecure();
     response.cookies.set(clearedCookieSpec(ACCESS_COOKIE, "/", secure));
-    response.cookies.set(clearedCookieSpec(REFRESH_COOKIE, "/api/auth", secure));
+    response.cookies.set(clearedCookieSpec(REFRESH_COOKIE, withBasePath("/api/auth"), secure));
   }
   return response;
 }

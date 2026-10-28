@@ -39,7 +39,21 @@ const securityHeaders = [
   },
 ];
 
+/*
+ * Base path (issue #195): on the shared production domain this console is
+ * routed under /command — the root vercel.json rewrites /command/(.*) to
+ * this service, and basePath re-roots every page, asset and Next-primitive
+ * navigation (Link, router, redirect) under the same prefix. Raw browser
+ * APIs (fetch(), window.location) and cookie Path attributes do NOT get
+ * basePath for free, so the same value is exported as NEXT_PUBLIC_BASE_PATH
+ * (src/lib/base-path.ts prefixes those call sites). Local dev serves under
+ * the prefix too, so dev and prod share one URL shape.
+ */
+const basePath = "/command";
+
 const nextConfig: NextConfig = {
+  basePath,
+  env: { NEXT_PUBLIC_BASE_PATH: basePath },
   async headers() {
     return [
       {
