@@ -1,5 +1,10 @@
 // Command jobs runs the Motivra Jobs service: service requests, the
-// 18-status job state machine and technician assignments.
+// 18-status job state machine and technician assignments. It also serves
+// the garages domain (capacity, and from issue #169 the appointments
+// calendar) — the garage console's partner surface is tied to jobs and
+// shares this entrypoint, its database pool and its event publisher, while
+// the garages aggregate keeps its own package, store and migration chain
+// (ADR-0003 per-domain chains; no cross-domain table access).
 //
 // Boot is DEGRADED, never fatal (issue #122, ADR-0008): the listener binds
 // first and /healthz answers 200 immediately; configuration and dependency
@@ -22,7 +27,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Roy-Wanyoike/Motivra/backend/garages"
 	"github.com/Roy-Wanyoike/Motivra/backend/jobs"
+	garagesmigrations "github.com/Roy-Wanyoike/Motivra/backend/migrations/garages"
 	jobsnextmigrations "github.com/Roy-Wanyoike/Motivra/backend/migrations/jobs"
 	"github.com/Roy-Wanyoike/Motivra/backend/platform"
 )
@@ -100,6 +107,18 @@ func main() {
 			},
 		},
 		{
+			// The garages chain is separate (ADR-0003) and owns its own
+			// schema_migrations table; it is applied by this service
+			// because this service serves the garages HTTP surface.
+			Name: "migrations-garages",
+			Run: func(ctx context.Context) error {
+				if pool == nil {
+					return errors.New("database not connected yet")
+				}
+				return platform.MigrateUp(ctx, pool, garagesmigrations.FS, "schema_migrations_garages")
+			},
+		},
+		{
 			// Events publish on JetStream when MOTIVRA_NATS_URL is set (issue
 			// #28, deferral 2); unset stays broker-free with a nil publisher.
 			Name: "nats",
@@ -156,8 +175,10 @@ func main() {
 					return nil
 				}
 				svc := jobs.NewService(jobs.NewPostgresStore(pool), publisher)
+				garageSvc := garages.NewService(garages.NewPostgresStore(pool), publisher)
 				domain := chi.NewRouter()
 				jobs.Routes(domain, svc, platform.RequireAuthenticated)
+				garages.Routes(domain, garageSvc, platform.RequireAuthenticated)
 				boot.SetDomainHandler(domain)
 				return nil
 			},
