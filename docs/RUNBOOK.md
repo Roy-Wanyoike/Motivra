@@ -651,6 +651,38 @@ PostGIS required; Redis-backed distributed rate limiting active when
 migration chains at boot (identity, vehicles, jobs, dispatch, payments,
 inspections); Temporal intentionally absent from the stack yet.
 
+### Branch governance — two-branch model and protected rulesets (2026-10-28, issue #187)
+
+Repository branch policy as implemented, verified against the GitHub API
+(rulesets and branch listing) on 2026-10-28:
+
+- Exactly two permanent branches: **`dev` (integration)** and
+  **`main` (production)**. `dev` was cut from `main` at c1ebb2e and is the
+  merge target for all PRs; `main` is the production/deploy branch.
+- Both branches are protected by branch-protection rulesets with the same
+  rule shape: `dev-branch-protection` (ruleset ID **26035216**, scope
+  `refs/heads/dev`) and `main-branch-protection` (ruleset ID **22533278**,
+  scope = the default branch, `main`). Each requires a pull request to
+  merge, blocks branch deletion and non-fast-forward (force) pushes,
+  requires extra approval for unattributed (non-member-authored) changes,
+  and defines no bypass actors — protection cannot be sidestepped by any
+  role.
+- **All PRs target `dev`** — features, fixes, docs and dependency bumps.
+  Dependabot is pinned to `dev` via `target-branch: "dev"` in
+  `.github/dependabot.yml` (2026-10-28).
+- **A release is an explicitly authorized release PR from `dev` to `main`**,
+  opened only after integration validation on `dev` passes. Direct pushes
+  to either branch are impossible (rulesets above); preview promotions via
+  the Vercel dashboard are forbidden (see "Deployment governance" above).
+  `dev` is integration only and never serves production traffic.
+- **Production deploy signal:** Vercel production commit statuses on `main`
+  carry the contexts `Vercel – motivra` and `Vercel – motivra-wesk`
+  (verified on commit c1ebb2e, 2026-10-28). A merge to `main` without a
+  green production status from these contexts is not a completed release.
+- **Temporary branches** (`feature/*`, `fix/*`, `dependabot/*`) may be
+  deleted after their PR merges; `dev` and `main` are permanent — deletion
+  is blocked by both rulesets and must never be requested.
+
 ---
 
 ## 7. Backup & DR
