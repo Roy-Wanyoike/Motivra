@@ -68,7 +68,7 @@ is exposed read-only at `GET /v1/jobs/{id}/transitions`.
 |---|---|---|---|
 | POST | /v1/requests | authenticated | create a service request |
 | POST | /v1/requests/{id}/job | authenticated | convert a request into a job |
-| GET | /v1/jobs?status=&technician_id=&limit=&offset | DISPATCHER/ADMIN/SUPER_ADMIN | list jobs, optionally narrowed by status/technician (`status` omitted = every status, #123) |
+| GET | /v1/jobs?status=&technician_id=&limit=&offset | DISPATCHER/ADMIN/SUPER_ADMIN (unrestricted, audited) + GARAGE (own garage tenant only) | list jobs, optionally narrowed by status/technician (`status` omitted = every status, #123; garage bound = token `tenant_id` claim, #165) |
 | GET | /v1/jobs/{id} | authenticated | fetch one job |
 | POST | /v1/jobs/{id}/transitions | DISPATCHER/ADMIN/SUPER_ADMIN | move the job through the machine |
 | GET | /v1/jobs/{id}/transitions | authenticated | read the audit trail |
@@ -79,6 +79,21 @@ Contract: `contracts/jobs/openapi.yaml`. Errors are problem+json via
 `platform.WriteError` (401/403/404/409/422 mapped from the domain
 sentinels `ErrConflict`, `ErrAlreadyConverted`, `ErrRequestNotFound`,
 `ErrJobNotFound`).
+
+### Garage-scoped listing (#165)
+
+`GET /v1/jobs` additionally admits the `GARAGE` organizational principal
+(the apps/garage console job board). Its scope comes exclusively from the
+token's `tenant_id` claim — the garage's tenant id — and the query layer
+(`jobScopePredicate` tenant branch, jobs migration 000006) restricts every
+page to that tenant, so no cross-garage row is ever returned; there is no
+client-supplied garage selector. A GARAGE token without a `tenant_id`
+claim answers 403 (fail closed, the garages-domain convention, #170); a
+malformed claim answers 401. Operators keep the unrestricted board, and
+each operator page appends one `jobs.job.listed` record to the platform
+`audit_log` (ADR-0004 privileged-read auditing; a failed record fails the
+request). Garage and personal pages are tenant-bounded reads, not
+privileged ones, and are not audited.
 
 ## Events (JetStream, domain `jobs`)
 

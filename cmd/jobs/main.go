@@ -174,7 +174,8 @@ func main() {
 				if boot.DomainHandler() != nil {
 					return nil
 				}
-				svc := jobs.NewService(jobs.NewPostgresStore(pool), publisher)
+				svc := jobs.NewServiceWithAudit(jobs.NewPostgresStore(pool), publisher,
+					jobs.NewPostgresAuditRecorder(pool))
 				garageSvc := garages.NewService(garages.NewPostgresStore(pool), publisher)
 				domain := chi.NewRouter()
 				jobs.Routes(domain, svc, platform.RequireAuthenticated)
