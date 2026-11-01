@@ -31,7 +31,12 @@ type fakeStore struct {
 	evidence    map[uuid.UUID]Evidence
 	reports     map[uuid.UUID]Report
 	transitions []SessionTransition
-	now         time.Time
+	// verifications and verificationAudits mirror the atomic
+	// record+audit_log transaction of InsertReportVerification (issue
+	// #185); both slices stay append-only.
+	verifications      []ReportVerificationRecord
+	verificationAudits []ReportVerificationAudit
+	now                time.Time
 }
 
 func newFakeStore() *fakeStore {
@@ -301,6 +306,54 @@ func (f *fakeStore) GetReport(_ context.Context, sessionID uuid.UUID, version *i
 		return Report{}, fmt.Errorf("inspections: get report for session %s: %w", sessionID, ErrReportNotFound)
 	}
 	return *out, nil
+}
+
+func (f *fakeStore) InsertReportVerification(_ context.Context, rec *ReportVerificationRecord, audit *ReportVerificationAudit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[rec.SessionID]
+	if !ok {
+		return fmt.Errorf("inspections: insert report verification for session %s: %w", rec.SessionID, ErrSessionNotFound)
+	}
+	// Mirror the REPORT_AVAILABLE status guard trigger.
+	if s.Status != StatusReportAvailable {
+		return fmt.Errorf("inspections: insert report verification: session %s is %s, want %s: %w",
+			rec.SessionID, s.Status, StatusReportAvailable, ErrConflict)
+	}
+	// Mirror the atomic record+audit transaction: a missing audit entry is
+	// a programming error and must fail closed.
+	if audit == nil {
+		return fmt.Errorf("inspections: insert report verification: audit entry is required")
+	}
+	if rec.ID == uuid.Nil {
+		rec.ID = uuid.New()
+	}
+	rec.CreatedAt = f.stamp()
+	f.verifications = append(f.verifications, *rec)
+	f.verificationAudits = append(f.verificationAudits, *audit)
+	return nil
+}
+
+func (f *fakeStore) ListReportVerifications(_ context.Context, sessionID uuid.UUID, scope Scope) ([]ReportVerificationRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[sessionID]
+	if !ok || !sessionVisible(s, scope) {
+		return nil, fmt.Errorf("inspections: list report verifications for session %s: %w", sessionID, ErrSessionNotFound)
+	}
+	out := make([]ReportVerificationRecord, 0, len(f.verifications))
+	for _, rec := range f.verifications {
+		if rec.SessionID == sessionID {
+			out = append(out, rec)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	return out, nil
 }
 
 // capturePublisher records every published event (and the domain it was

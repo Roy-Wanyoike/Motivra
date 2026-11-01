@@ -107,6 +107,21 @@ type Store interface {
 	// version is nil, else that exact version — for a session visible to
 	// scope, or an error wrapping ErrReportNotFound.
 	GetReport(ctx context.Context, sessionID uuid.UUID, version *int, scope Scope) (Report, error)
+
+	// InsertReportVerification appends the human verification record rec AND
+	// its platform audit_log entry audit in ONE transaction (issue #185):
+	// an audit failure rolls the record back, so no verification decision can
+	// ever exist without its audit trail (ADR-0004). audit must not be nil.
+	// It assigns rec.ID when unset and populates rec.CreatedAt. The database
+	// refuses the insert when the session is not REPORT_AVAILABLE (status
+	// guard trigger) or when (report_id, session_id) do not pair (composite
+	// FK); both fail with an error wrapping ErrSessionNotFound or
+	// ErrConflict respectively.
+	InsertReportVerification(ctx context.Context, rec *ReportVerificationRecord, audit *ReportVerificationAudit) error
+
+	// ListReportVerifications returns the session's verification records in
+	// chronological order (oldest first), for a session visible to scope.
+	ListReportVerifications(ctx context.Context, sessionID uuid.UUID, scope Scope) ([]ReportVerificationRecord, error)
 }
 
 // PostgresStore implements Store on PostgreSQL through pgx.
@@ -542,6 +557,93 @@ func (s *PostgresStore) GetReport(ctx context.Context, sessionID uuid.UUID, vers
 		return Report{}, fmt.Errorf("inspections: get report: %w", err)
 	}
 	return r, nil
+}
+
+// InsertReportVerification implements Store: the verification record and
+// its audit_log entry commit together or not at all.
+func (s *PostgresStore) InsertReportVerification(ctx context.Context, rec *ReportVerificationRecord, audit *ReportVerificationAudit) error {
+	if rec == nil {
+		return fmt.Errorf("inspections: insert report verification: record is required")
+	}
+	if audit == nil {
+		// Fail closed: a verification decision without its audit entry must
+		// never be written (ADR-0004).
+		return fmt.Errorf("inspections: insert report verification: audit entry is required")
+	}
+	if rec.ID == uuid.Nil {
+		rec.ID = uuid.New()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("inspections: begin insert report verification: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	err = tx.QueryRow(ctx, `
+                INSERT INTO inspection_report_verifications
+                        (id, report_id, session_id, report_version, outcome, reviewer_id, note, integrity_verified)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING created_at`,
+		rec.ID, rec.ReportID, rec.SessionID, rec.Version, rec.Outcome, rec.ReviewerID, rec.Note, rec.IntegrityVerified,
+	).Scan(&rec.CreatedAt)
+	if err != nil {
+		if isForeignKeyViolation(err) {
+			return fmt.Errorf("inspections: insert report verification: %w", ErrSessionNotFound)
+		}
+		return fmt.Errorf("inspections: insert report verification: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+                INSERT INTO audit_log (actor_id, action, object_type, object_id, tenant_id, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6)`,
+		audit.ActorID, audit.Action, audit.ObjectType, audit.ObjectID, audit.TenantID, audit.Metadata,
+	); err != nil {
+		return fmt.Errorf("inspections: insert report verification audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("inspections: commit insert report verification: %w", err)
+	}
+	return nil
+}
+
+// verificationRecordColumns are the scan columns of a verification record.
+const verificationRecordColumns = `id, report_id, session_id, report_version, outcome, reviewer_id, note, integrity_verified, created_at`
+
+// ListReportVerifications implements Store. The EXISTS subquery re-applies
+// the session visibility predicate, so records of invisible sessions read
+// as missing (empty list through the service's own not-found check).
+func (s *PostgresStore) ListReportVerifications(ctx context.Context, sessionID uuid.UUID, scope Scope) ([]ReportVerificationRecord, error) {
+	pred, predArgs := scopePredicate(scope, "s.tenant_id", "s.inspector_id", "s.customer_id", 2)
+	where := "v.session_id = $1"
+	args := []any{sessionID}
+	if pred != "" {
+		where += " AND EXISTS (SELECT 1 FROM inspection_sessions s WHERE s.id = v.session_id AND " + pred + ")"
+		args = append(args, predArgs...)
+	}
+	query := `
+                SELECT ` + verificationRecordColumns + `
+                FROM inspection_report_verifications v
+                WHERE ` + where + `
+                ORDER BY v.created_at ASC, v.id ASC`
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("inspections: list report verifications: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ReportVerificationRecord, 0, 4)
+	for rows.Next() {
+		var rec ReportVerificationRecord
+		if err := rows.Scan(&rec.ID, &rec.ReportID, &rec.SessionID, &rec.Version, &rec.Outcome, &rec.ReviewerID, &rec.Note, &rec.IntegrityVerified, &rec.CreatedAt); err != nil {
+			return nil, fmt.Errorf("inspections: scan report verification: %w", err)
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("inspections: list report verifications: %w", err)
+	}
+	return out, nil
 }
 
 func scanSession(row pgx.Row) (Session, error) {
