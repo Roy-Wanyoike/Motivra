@@ -133,12 +133,29 @@ type Service struct {
 	store     Store
 	publisher platform.Publisher
 	metrics   *Metrics
+	// media is the evidence-media stack attached via WithMedia (issue
+	// #186). nil — or a stack missing its signer or backend — keeps every
+	// media endpoint fail-closed (503): evidence bytes are never minted or
+	// served unsigned or unaudited.
+	media *mediaStack
 }
 
+// Option mutates optional Service wiring. Options are applied by NewService
+// after the core dependencies; the media option lives in media.go (issue
+// #186).
+type Option func(*Service)
+
 // NewService returns a Service over store. publisher and metrics may be
-// nil.
-func NewService(store Store, publisher platform.Publisher, metrics *Metrics) *Service {
-	return &Service{store: store, publisher: publisher, metrics: metrics}
+// nil. Optional wiring arrives through opts (WithMedia for the
+// evidence-media surface).
+func NewService(store Store, publisher platform.Publisher, metrics *Metrics, opts ...Option) *Service {
+	s := &Service{store: store, publisher: publisher, metrics: metrics}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // CreateSession validates and persists a new inspection session. The

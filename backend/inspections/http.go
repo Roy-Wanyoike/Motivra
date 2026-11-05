@@ -35,6 +35,8 @@ const maxRequestBytes int64 = 64 << 10
 //	GET  /v1/inspections/sessions/{sessionID}/report/verification  recompute report integrity
 //	POST /v1/inspections/sessions/{sessionID}/report/verification/outcome   record human verdict (reviewer roles)
 //	GET  /v1/inspections/sessions/{sessionID}/report/verification/records   verification trail (authenticated, scoped)
+//	GET  /v1/inspections/sessions/{sessionID}/evidence/{evidenceID}/media  mint a short-TTL signed media URL (authenticated, scoped)
+//	GET  /v1/inspections/media/{sessionID}/{evidenceID}   fetch evidence media through a signed URL (signature-gated)
 //	GET  /v1/inspections/templates                   list the system template registry
 //	GET  /v1/inspections/templates/{templateID}      fetch one registered template
 //
@@ -66,6 +68,11 @@ func Routes(r chi.Router, svc *Service, requireAuth func(http.HandlerFunc) http.
 			RegisterReportVerificationRoutes(r, svc, requireAuth)
 		})
 	})
+	// Evidence media (issue #186): short-TTL HMAC-signed URLs — the
+	// mint endpoint rides the sessions contract above; the signed
+	// object fetch is capability-gated. Registered in one place so the
+	// surface stays reviewable (media_http.go).
+	RegisterEvidenceMediaRoutes(r, svc, requireAuth)
 	r.Route("/v1/inspections/templates", func(r chi.Router) {
 		r.Get("/", requireAuth(svc.handleListTemplates))
 		r.Get("/{templateID}", requireAuth(svc.handleGetTemplate))
