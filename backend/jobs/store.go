@@ -120,6 +120,8 @@ const requestColumns = `id, tenant_id, customer_id, vehicle_id, description, loc
 
 const jobColumns = `id, tenant_id, service_request_id, customer_id, vehicle_id, status, problem_summary, technician_id, created_at, updated_at`
 
+const transitionColumns = `id, job_id, tenant_id, from_status, to_status, actor_id, reason, created_at`
+
 // requestScopePredicate renders the visibility condition for service
 // requests (ADR-0004). nextParam is the placeholder the condition starts
 // at. The zero scope fails closed and matches no rows at all.
@@ -496,8 +498,7 @@ func (s *PostgresStore) ListJobs(ctx context.Context, filter JobFilter, limit, o
 // denormalized tenant_id column, so transitions of invisible jobs return
 // an empty trail exactly like unknown jobs.
 func (s *PostgresStore) ListTransitions(ctx context.Context, jobID uuid.UUID, scope ReadScope) ([]JobTransition, error) {
-	query := `
-                SELECT id, job_id, tenant_id, from_status, to_status, actor_id, reason, created_at
+	query := `SELECT ` + transitionColumns + `
                 FROM job_transitions
                 WHERE job_id = $1`
 	args := []any{jobID}
@@ -531,11 +532,11 @@ func (s *PostgresStore) ListTransitions(ctx context.Context, jobID uuid.UUID, sc
 
 	var out []JobTransition
 	for rows.Next() {
-		var t JobTransition
-		if err := rows.Scan(&t.ID, &t.JobID, &t.FromStatus, &t.ToStatus, &t.ActorID, &t.Reason, &t.CreatedAt); err != nil {
+		tr, err := scanTransition(rows)
+		if err != nil {
 			return nil, fmt.Errorf("jobs: scan transition: %w", err)
 		}
-		out = append(out, t)
+		out = append(out, tr)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("jobs: list transitions: %w", err)
@@ -561,4 +562,17 @@ func scanJob(row pgx.Row) (Job, error) {
 		return Job{}, err
 	}
 	return j, nil
+}
+
+// scanTransition reads one job_transitions row in transitionColumns order
+// (issue #209: the tenant_id column is selected and must be scanned too —
+// pgx v5 rejects a row scan whose destination count differs from the field
+// description count, which made every ListTransitions call error).
+func scanTransition(row pgx.Row) (JobTransition, error) {
+	var t JobTransition
+	err := row.Scan(&t.ID, &t.JobID, &t.TenantID, &t.FromStatus, &t.ToStatus, &t.ActorID, &t.Reason, &t.CreatedAt)
+	if err != nil {
+		return JobTransition{}, err
+	}
+	return t, nil
 }
