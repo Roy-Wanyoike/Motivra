@@ -2,7 +2,7 @@
 
 Technician availability, service areas and explainable dispatch scoring (fit, distance, equipment, performance). See docs/ARCHITECTURE.md §2 for the context boundaries.
 
-This directory currently contains the **dispatch scoring engine** (issue #19): `scoring.go` (the engine), `http.go` (the HTTP API) and their tests. The service boots from `cmd/dispatch`.
+This directory currently contains the **dispatch scoring engine** (issue #19) and the **verified-only eligibility gate** (issue #167): `scoring.go` (the engine), `eligibility.go` (the gate), `http.go` (the HTTP API), `audit.go` (decision records) and their tests. The service boots from `cmd/dispatch`.
 
 ## Philosophy
 
@@ -10,6 +10,28 @@ This directory currently contains the **dispatch scoring engine** (issue #19): `
 - **Explainable by construction.** Every factor carries a weight, a raw metric, a normalized 0-1 value and a human-readable reason that names its inputs ("matches 2/2 required skills (engine, brakes); rated on Toyota"). There are no hidden multipliers: anything that moves a score is a named factor, and `GET /v1/dispatch/factors` publishes the full catalogue. a dispatcher can always ask "why this technician?" and get an answer.
 - **Advisory, not autonomous.** The engine recommends an ordering. It never assigns, reassigns or cancels a job. Decisions (and their audit trail) land with the jobs integration.
 - **Pure function.** No database, no broker, no clock, no randomness. The service is stateless; all inputs arrive in the request.
+
+## Eligibility gate (issue #167, Phase 3 of the graduate-mechanic pipeline #126)
+
+Before scoring, a request MAY enable up to three **hard gates** via the optional `eligibility` block on `POST /v1/dispatch/score`:
+
+| Gate | Option | Rule |
+|---|---|---|
+| Verification | `verified_only` | Only technicians whose identity verification status is exactly `verified` are eligible (issue #126: unverified technicians receive NO dispatched jobs). A missing status fails closed — it is treated as not verified. Any other value (including values the identity contract may add later) is ineligible. |
+| Skills | `require_skills` | The candidate's skills must intersect the job's required skills (at least one match). A job that names no skills imposes no constraint. |
+| Service area | `require_service_area` | The candidate must serve the job's coarse `service_area` label (case-insensitive string match). A job with no area imposes no constraint. |
+
+Design decisions (also recorded in the decision audit and the PR):
+
+- **Hard gates before scoring, not weighted factors.** A weight could still let an unverified technician top the ranking when peers are scarce; exclusion is the only mechanism that satisfies "unverified technicians receive no dispatched jobs". The gate verdicts are explainable like the factors: every evaluated candidate gets a verdict with raw facts (`verified`, `skills_match`, `area_match`) and one human-readable reason per enabled gate, in the fixed order verification → skills → area.
+- **Excluded candidates are never scored** ("scored-and-then-demoted" is explicitly rejected): they appear in `eligibility.verdicts` with their exclusion reasons, and never in `scores`. The decision record's chosen technician is the top **eligible** score; when nobody is eligible the decision is still audited — chosen technician is the zero UUID and the verdicts explain why nobody was recommended.
+- **Skills = intersection semantics.** One matching skill passes the gate (the issue asks for an intersection); partial coverage is still down-weighted openly by the `technical_fit` factor ("matches 1/2 required skills; missing (brakes)"). All-or-nothing matching would double-gate the same data with no added safety.
+- **The eligibility options are part of the inputs hash**, so a re-score under different gates is never conflated with the original decision.
+- **Backward compatible:** an omitted `eligibility` block keeps the pre-#167 behaviour exactly (every candidate scored, no eligibility key in the response or the audit metadata). The block is additive in `contracts/dispatch/openapi.yaml`.
+
+### Integration point with identity (issue #166, parallel)
+
+The verification-status vocabulary (`unverified | assessment_pending | verified`) and the skills profile (trade, specializations) and coarse service area (`area_name` + `county`) are owned by the technician contract (`contracts/technician/openapi.yaml`, issue #166). Dispatch deliberately does **not** re-validate the status enum and does **not** read identity's tables: the caller (the dispatch console, later the jobs integration) composes candidates from #166's read APIs — `GET /v1/technician/verification-status` and the technician profile — and posts `verification_status` / `skills` / `service_areas` per candidate. Because the gate only needs "`verified` means verified", it cannot break when #166 extends its lifecycle (e.g. a rejected state). An event-driven projection (`technician.verified.v1`) is deliberately deferred; the first dispatch-chain migration will arrive with it, not before — the gate itself is stateless and adds no tables.
 
 ## Factors
 
@@ -45,7 +67,7 @@ Contract: `contracts/dispatch/openapi.yaml`.
 
 | Endpoint | Roles | Purpose |
 |---|---|---|
-| `POST /v1/dispatch/score` | DISPATCHER, ADMIN, SUPER_ADMIN | Score a candidate set (cap 200) against a job context; optional custom weights (must sum to 1.0) |
+| `POST /v1/dispatch/score` | DISPATCHER, ADMIN, SUPER_ADMIN | Score a candidate set (cap 200) against a job context; optional custom weights (must sum to 1.0); optional `eligibility` block enabling the verified-only / skills / service-area gates (issue #167) |
 | `GET /v1/dispatch/factors` | DISPATCHER, ADMIN, SUPER_ADMIN | Factor catalogue + default weights |
 
 Input validation rejects out-of-range rates, negative ETA/distance, zero technician IDs and oversized lists rather than silently clamping, so a broken producer cannot distort a recommendation.
@@ -63,7 +85,7 @@ Deliberately out of scope for the engine today, and shaped so they can slot in w
 
 ## Do NOT
 
-- **No opaque punishment.** No hidden multipliers, shadow penalties or factors outside the published catalogue; every effect must appear in `factors` with a reason.
+- **No opaque punishment.** No hidden multipliers, shadow penalties or factors outside the published catalogue; every effect must appear in `factors` with a reason. The eligibility gate is not an exception: exclusions are hard, visible and reasoned in `eligibility.verdicts` (issue #167).
 - **No auto-reassignment.** The engine scores; it never mutates job state. Assignment, reassignment and cancellation belong to the jobs domain.
-- **No PII in scores or reasons.** Reasons name skills, makes, parts and metrics — never customer or technician personal data.
-- **No randomness or time-based inputs.** Determinism is a contract; the same input must always produce the same output and ordering.
+- **No PII in scores, reasons or verdicts.** Reasons name skills, makes, parts, areas, statuses and metrics — never customer or technician personal data. Service areas are coarse labels only (PII-HANDLING.md).
+- **No randomness or time-based inputs.** Determinism is a contract; the same input must always produce the same output and ordering — eligibility verdicts included.
