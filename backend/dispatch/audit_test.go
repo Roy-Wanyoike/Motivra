@@ -144,11 +144,19 @@ func TestScoreEndpointDecisionInputsHashIsDeterministic(t *testing.T) {
 	cands := []Candidate{{TechnicianID: uuid.New(), ETAMinutes: 10, Available: true}}
 	job := JobContext{RequiredSkills: []string{"engine"}}
 	w := DefaultWeights()
-	assert.Equal(t, InputsHash(job, cands, w), InputsHash(job, cands, w))
+	assert.Equal(t, InputsHash(job, cands, w, nil), InputsHash(job, cands, w, nil))
 	reordered := []Candidate{cands[0], {TechnicianID: uuid.New(), ETAMinutes: 5, Available: true}}
-	assert.NotEqual(t, InputsHash(job, cands, w), InputsHash(job, reordered, w),
+	assert.NotEqual(t, InputsHash(job, cands, w, nil), InputsHash(job, reordered, w, nil),
 		"candidate order is part of what was scored")
-	assert.NotEqual(t, InputsHash(job, cands, w), InputsHash(JobContext{RequiredSkills: []string{"brakes"}}, cands, w))
+	assert.NotEqual(t, InputsHash(job, cands, w, nil), InputsHash(JobContext{RequiredSkills: []string{"brakes"}}, cands, w, nil))
+	// The eligibility configuration is part of what was scored (issue
+	// #167): gating decides who is scored, so it must change the digest.
+	assert.NotEqual(t, InputsHash(job, cands, w, nil),
+		InputsHash(job, cands, w, &EligibilityOptions{VerifiedOnly: true}),
+		"enabling the eligibility gate must change the inputs hash")
+	assert.Equal(t, InputsHash(job, cands, w, &EligibilityOptions{VerifiedOnly: true}),
+		InputsHash(job, cands, w, &EligibilityOptions{VerifiedOnly: true}),
+		"identical gate options hash identically")
 }
 
 func TestScoreEndpointFailClosedOnRecorderFailure(t *testing.T) {
