@@ -172,6 +172,12 @@ type gatewayWiring struct {
 	breachCfg       identity.BreachConfig
 	verificationCfg identity.VerificationConfig
 
+	// Evidence-media signing (issue #186): the key comes only from the
+	// environment (inspections.EnvEvidenceSigningKey, ADR-0007 pattern).
+	// nil keeps the inspections media endpoints fail-closed (503) without
+	// touching any other surface.
+	mediaSigner *inspections.MediaSigner
+
 	// Payments provider wiring (the cmd/payments contract).
 	sandboxWebhookSecret string
 	darajaCfg            payments.DarajaConfig
@@ -191,6 +197,18 @@ func newGatewayWiring(cfg platform.Config, logger *slog.Logger, metrics *platfor
 		sandboxSecret = defaultSandboxWebhookSecret
 	}
 	darajaCfg, darajaComplete := payments.DarajaConfigFromEnvironment()
+	// Evidence-media signing (issue #186): env-only key (ADR-0007 naming
+	// pattern). Unconfigured/invalid outside development/test is a loud
+	// degraded state — the inspections media endpoints answer 503 fail-closed
+	// and everything else serves — never a silent bypass and never a boot
+	// failure for a key no deployment has needed before this change.
+	mediaSigner, mediaErr := inspections.NewMediaSignerFromEnv(cfg.App.Env)
+	if mediaErr != nil {
+		logger.Warn("inspections evidence media signing unavailable; media endpoints answer 503 until configured",
+			"error", mediaErr,
+			"env_key", inspections.EnvEvidenceSigningKey)
+		mediaSigner = nil
+	}
 	return &gatewayWiring{
 		cfg:                  cfg,
 		logger:               logger,
@@ -202,6 +220,7 @@ func newGatewayWiring(cfg platform.Config, logger *slog.Logger, metrics *platfor
 		darajaComplete:       darajaComplete,
 		paymentsSelection:    envOr(envPaymentsProvider, payments.ProviderSandbox),
 		reconcileInterval:    defaultReconcileInterval,
+		mediaSigner:          mediaSigner,
 	}
 }
 
@@ -564,12 +583,15 @@ func productionMounts(w *gatewayWiring) domainRoutes {
 	}
 	w.reconciler = paymentsRec
 
-	// Inspections: template registry + session state machine.
+	// Inspections: template registry + session state machine. The media
+	// signer rides the environment-only key resolved in newGatewayWiring
+	// (issue #186); nil keeps the media endpoints fail-closed (503).
 	var inspectionsMetrics *inspections.Metrics
 	if w.metrics != nil {
 		inspectionsMetrics = inspections.NewMetrics(w.metrics.Registry())
 	}
-	inspectionsSvc := inspections.NewService(inspections.NewPostgresStore(w.pool), w.publisher, inspectionsMetrics)
+	inspectionsSvc := inspections.NewService(inspections.NewPostgresStore(w.pool), w.publisher, inspectionsMetrics,
+		inspections.WithMedia(w.mediaSigner, inspections.NewPostgresMediaStore(w.pool)))
 
 	return domainRoutes{
 		Identity: func(r chi.Router) { identity.Routes(r, identitySvc, authLimiter) },

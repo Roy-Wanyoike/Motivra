@@ -13,10 +13,30 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/Roy-Wanyoike/Motivra/backend/inspections"
 	inspectionsmigrations "github.com/Roy-Wanyoike/Motivra/backend/migrations/inspections"
 	"github.com/Roy-Wanyoike/Motivra/backend/platform"
 )
+
+// mediaOption builds the evidence-media wiring (issue #186): the signer is
+// constructed from the environment-only signing key (ADR-0007 env-contract
+// pattern) and the backend rides the domain's own pool. An unconfigured or
+// invalid key is a LOUD degraded state, never a silent bypass: the media
+// endpoints fail closed (503) while every other surface keeps serving, and
+// the reason is logged once here (returning no option leaves the service
+// media-less, which the domain treats identically: fail closed).
+func mediaOption(cfg platform.Config, logger *slog.Logger, pool *pgxpool.Pool) inspections.Option {
+	signer, err := inspections.NewMediaSignerFromEnv(cfg.App.Env)
+	if err != nil {
+		logger.Warn("inspections evidence media signing unavailable; media endpoints answer 503 until configured",
+			"error", err,
+			"env_key", inspections.EnvEvidenceSigningKey)
+		return nil
+	}
+	return inspections.WithMedia(signer, inspections.NewPostgresMediaStore(pool))
+}
 
 func main() {
 	cfg := platform.Load()
@@ -71,7 +91,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	svc := inspections.NewService(inspections.NewPostgresStore(pool), publisher, domainMetrics)
+	svc := inspections.NewService(inspections.NewPostgresStore(pool), publisher, domainMetrics,
+		mediaOption(cfg, logger, pool))
 
 	// Token verification (ADR-0007, issue #87): public keys only — JWKS
 	// from the identity service by default, or a distributed key file. The

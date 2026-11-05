@@ -37,8 +37,22 @@ info:
     append-only, carries the integrity snapshot at decision time and writes
     an audit_log row in the same transaction.
 
+    Evidence media (issue #186, SECURITY): evidence records themselves still
+    carry provenance only, and the media retrieval contract is pinned as
+    access-controlled from day one. `GET .../evidence/{evidenceID}/media`
+    mints a short-TTL HMAC-signed URL (default 5 minutes, purpose-bound to
+    `evidence-media`, path-pinned to the exact object and bound to the
+    evidence content hash) — never a permanent public link. The signed fetch
+    route `/v1/inspections/media/{sessionID}/{evidenceID}` accepts NO bearer
+    token: the constant-time-verified signature is the credential, the TTL
+    and purpose are enforced server-side, anonymous access is refused 401,
+    and every mint and every served fetch writes an audit_log row.
+
     All endpoints require a Bearer access token issued by the identity
-    service (HS256). Errors are RFC 7807-style `application/problem+json`.
+    service — with exactly one exception: the signature-gated evidence-media
+    fetch route (issue #186), where the HMAC signature is the credential and
+    a bearer token is deliberately absent. Errors are RFC 7807-style
+    `application/problem+json`.
 servers:
   - url: /
 tags:
@@ -296,6 +310,122 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/inspections/sessions/{sessionID}/evidence/{evidenceID}/media:
+    get:
+      operationId: getInspectionEvidenceMediaUrl
+      summary: Mint a short-TTL signed URL for evidence media
+      description: |
+        Authorizes through the caller's scope against BOTH the session and
+        the evidence row (invisible and unknown resources answer 404), then
+        mints an HMAC-SHA256 signed fetch URL scoped to the exact object,
+        bound to the evidence content hash, purpose-bound to
+        `evidence-media` and expiring after a short TTL (default 5 minutes;
+        bounded to 30s–5m, never longer). The response is the issue #186
+        contract shape; the URL targets the signature-gated fetch route and
+        carries no bearer requirement. The mint is audited
+        (`inspections.evidence.media.url_issued`). Requires
+        `MOTIVRA_INSPECTIONS_EVIDENCE_SIGNING_KEY`; without it the endpoint
+        answers 503 fail-closed.
+      tags: [sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+        - $ref: '#/components/parameters/EvidenceID'
+      responses:
+        '200':
+          description: Signed URL minted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceMediaGrant'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/inspections/media/{sessionID}/{evidenceID}:
+    get:
+      operationId: fetchInspectionEvidenceMedia
+      summary: Fetch evidence media bytes through a signed URL
+      description: |
+        The only route that serves evidence bytes, and it serves them ONLY to
+        a validly signed URL minted by `getInspectionEvidenceMediaUrl`: the
+        HMAC-SHA256 signature is verified in constant time, the zero-leeway
+        TTL and the `evidence-media` purpose binding are enforced
+        server-side, and the URL is path-pinned to this exact object and
+        bound to the evidence content hash. There is deliberately no bearer
+        path here and no public link anywhere: anonymous, tampered, expired
+        or wrong-purpose requests answer 401. Every served fetch is audited
+        (`inspections.evidence.media.served`). Responses carry
+        `Cache-Control: private, no-store` (PII media is never cacheable).
+      tags: [sessions]
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+        - $ref: '#/components/parameters/EvidenceID'
+        - name: v
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: ["1"]
+          description: Signed-URL scheme version (MAC-bound).
+        - name: aud
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [evidence-media]
+          description: Purpose binding; a signature for another purpose is refused.
+        - name: exp
+          in: query
+          required: true
+          schema:
+            type: integer
+          description: Unix-seconds expiry; zero-leeway TTL enforced server-side.
+        - name: sub
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Principal the URL was minted for (MAC-bound; the audit actor).
+        - name: hash
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+          description: The evidence content hash the URL is bound to.
+        - name: sig
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+          description: HMAC-SHA256 signature over the canonical request form.
+      responses:
+        '200':
+          description: Media bytes.
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Missing, invalid, tampered, wrong-purpose or expired signature.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /v1/inspections/sessions/{sessionID}/submit:
     post:
       operationId: submitInspectionSession
@@ -554,6 +684,13 @@ components:
       schema:
         type: string
         format: uuid
+    EvidenceID:
+      name: evidenceID
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
   responses:
     Unauthorized:
       description: Missing, invalid or expired access token.
@@ -581,6 +718,12 @@ components:
             $ref: '#/components/schemas/Error'
     ValidationError:
       description: Request body or query parameters are invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: The evidence-media surface is not configured on this deployment (no signing key / no storage backend); it fails closed.
       content:
         application/problem+json:
           schema:
@@ -837,6 +980,28 @@ components:
         created_at:
           type: string
           format: date-time
+    EvidenceMediaGrant:
+      type: object
+      description: |
+        One short-TTL signed URL for evidence media (issue #186). The URL is
+        an HMAC-SHA256 capability bound to the exact object, its content
+        hash, the `evidence-media` purpose, the minted-for principal and the
+        expiry — never a permanent public link. When it expires the client
+        requests a fresh one from this endpoint.
+      required: [url, expires_at, method]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: The signed fetch URL (https wherever TLS terminates in front of the API).
+        expires_at:
+          type: string
+          format: date-time
+          description: The exact expiry; past it the URL answers 401 (zero leeway).
+        method:
+          type: string
+          enum: [GET]
+          description: The HTTP method the signature is valid for.
     Report:
       type: object
       properties:
