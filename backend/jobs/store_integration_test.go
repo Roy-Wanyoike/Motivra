@@ -126,6 +126,7 @@ func TestJobLifecycleIntegration(t *testing.T) {
 	require.Equal(t, "technician accepted assignment", transitions[3].Reason)
 	for i, tr := range transitions {
 		require.False(t, tr.CreatedAt.IsZero(), "transition %d must carry its row timestamp", i)
+		require.Nil(t, tr.TenantID, "transition %d of a personal job carries a NULL tenant (issue #209: tenant_id must be scanned)", i)
 	}
 
 	// Scoped listing at the SQL level: the customer sees the job, the
@@ -275,6 +276,10 @@ func TestJobTenantIsolationIntegration(t *testing.T) {
 	trailA, err := store.ListTransitions(ctx, jobA.ID, tenantScope(tenantA))
 	require.NoError(t, err)
 	require.Len(t, trailA, 2, "the tenant reads its own trail (transition + assignment)")
+	for i, tr := range trailA {
+		require.NotNil(t, tr.TenantID, "trail row %d must carry the denormalized tenant_id (issue #209)", i)
+		require.Equal(t, tenantA, *tr.TenantID, "trail row %d is stamped with the job's tenant", i)
+	}
 	trailB, err := store.ListTransitions(ctx, jobA.ID, tenantScope(tenantB))
 	require.NoError(t, err)
 	assert.Empty(t, trailB, "another tenant reads an empty trail")
