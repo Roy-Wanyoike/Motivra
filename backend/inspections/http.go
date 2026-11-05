@@ -33,6 +33,8 @@ const maxRequestBytes int64 = 64 << 10
 //	POST /v1/inspections/sessions/{sessionID}/report       assemble + issue the report (staff roles)
 //	GET  /v1/inspections/sessions/{sessionID}/report       fetch the report (authenticated, scoped)
 //	GET  /v1/inspections/sessions/{sessionID}/report/verification  recompute report integrity
+//	POST /v1/inspections/sessions/{sessionID}/report/verification/outcome   record human verdict (reviewer roles)
+//	GET  /v1/inspections/sessions/{sessionID}/report/verification/records   verification trail (authenticated, scoped)
 //	GET  /v1/inspections/templates                   list the system template registry
 //	GET  /v1/inspections/templates/{templateID}      fetch one registered template
 //
@@ -61,6 +63,7 @@ func Routes(r chi.Router, svc *Service, requireAuth func(http.HandlerFunc) http.
 			r.Post("/report", requireStaff(svc.handleIssueReport))
 			r.Get("/report", requireAuth(svc.handleGetReport))
 			r.Get("/report/verification", requireAuth(svc.handleVerifyReport))
+			RegisterReportVerificationRoutes(r, svc, requireAuth)
 		})
 	})
 	r.Route("/v1/inspections/templates", func(r chi.Router) {

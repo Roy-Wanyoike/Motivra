@@ -1,0 +1,11 @@
+DROP TRIGGER IF EXISTS inspection_report_verifications_require_report_available ON inspection_report_verifications;
+DROP FUNCTION IF EXISTS refuse_inspection_report_verifications_outside_report_available();
+DROP TRIGGER IF EXISTS inspection_report_verifications_append_only ON inspection_report_verifications;
+DROP FUNCTION IF EXISTS prevent_inspection_report_verifications_mutation();
+ALTER TABLE inspection_report_verifications
+    DROP CONSTRAINT IF EXISTS inspection_report_verifications_report_pair_fk;
+ALTER TABLE inspection_reports
+    DROP CONSTRAINT IF EXISTS inspection_reports_id_session_key;
+DROP INDEX IF EXISTS inspection_report_verifications_report_idx;
+DROP INDEX IF EXISTS inspection_report_verifications_session_idx;
+DROP TABLE IF EXISTS inspection_report_verifications;

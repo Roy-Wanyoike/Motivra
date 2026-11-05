@@ -29,7 +29,13 @@ info:
 
     Domain events publish on JetStream as `motivra.inspections.<aggregate>.<event>.v1`:
     `session.created.v1`, `session.started.v1`, `session.submitted.v1`,
-    `report.issued.v1`.
+    `report.issued.v1`, `report.verified.v1`, `report.rejected.v1`.
+
+    Human verification (issue #185): authorized reviewers (GARAGE, ADMIN,
+    SUPER_ADMIN) record a VERIFIED/REJECTED verdict on a REPORT_AVAILABLE
+    report through `/report/verification/outcome`; every decision is
+    append-only, carries the integrity snapshot at decision time and writes
+    an audit_log row in the same transaction.
 
     All endpoints require a Bearer access token issued by the identity
     service (HS256). Errors are RFC 7807-style `application/problem+json`.
@@ -406,6 +412,79 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReportVerification'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/inspections/sessions/{sessionID}/report/verification/outcome:
+    post:
+      operationId: recordInspectionReportVerificationOutcome
+      summary: Record the human verification verdict
+      description: |
+        Appends the reviewer's verdict to the issued report (issue #185):
+        `VERIFIED` requires the current integrity recomputation to pass —
+        a failed check answers 409 naming every failed check — while
+        `REJECTED` is always allowed on a reviewable report and records the
+        integrity snapshot as observed. The session must be
+        REPORT_AVAILABLE; the capturing inspector may never verify their
+        own work (separation of duties). The reviewer identity comes from
+        the verified token, never from the body.
+
+        The record is append-only (corrections are new records; the newest
+        per report wins) and commits in one transaction with an audit_log
+        entry carrying the full integrity snapshot. Publishes
+        `report.verified.v1` or `report.rejected.v1`.
+
+        Roles: GARAGE, ADMIN, SUPER_ADMIN. TECHNICIAN and DISPATCHER are
+        denied (403) — the capturing inspector never verifies their own
+        work; CUSTOMER is denied (403).
+      tags: [reports]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordVerificationInput'
+      responses:
+        '201':
+          description: The recorded verification decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportVerificationRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/inspections/sessions/{sessionID}/report/verification/records:
+    get:
+      operationId: listInspectionReportVerificationRecords
+      summary: List the report's verification records
+      description: |
+        The append-only human verification trail, oldest first. Readable by
+        every principal the report itself is visible to (tenant, personal
+        inspector/customer linkage, operators). There is no update or
+        delete: corrections are new records.
+      tags: [reports]
+      parameters:
+        - $ref: '#/components/parameters/SessionID'
+      responses:
+        '200':
+          description: The verification trail (possibly empty), oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReportVerificationRecord'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -846,6 +925,59 @@ components:
         recomputed_hash:
           type: string
         checked_at:
+          type: string
+          format: date-time
+    VerificationOutcome:
+      type: string
+      enum: [VERIFIED, REJECTED]
+      description: The human verdict on a report.
+    RecordVerificationInput:
+      type: object
+      required: [outcome]
+      properties:
+        outcome:
+          $ref: '#/components/schemas/VerificationOutcome'
+        note:
+          type: string
+          maxLength: 2000
+          description: The reviewer's rationale. Required in spirit for REJECTED; capped for both.
+        expected_report_version:
+          type: integer
+          minimum: 1
+          description: |
+            Optimistic-concurrency guard: when present, the current report
+            version must equal it or the decision answers 409.
+    ReportVerificationRecord:
+      type: object
+      description: |
+        One append-only human verification decision (issue #185). Rows are
+        never updated or deleted; a correction is a new record and the
+        newest record per report wins. Every record commits in one
+        transaction with an audit_log entry.
+      properties:
+        id:
+          type: string
+          format: uuid
+        report_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        report_version:
+          type: integer
+        outcome:
+          $ref: '#/components/schemas/VerificationOutcome'
+        reviewer_id:
+          type: string
+          format: uuid
+          description: From the verified token — never client input.
+        note:
+          type: string
+        integrity_verified:
+          type: boolean
+          description: Snapshot of the integrity recomputation at decision time.
+        created_at:
           type: string
           format: date-time
     Error:
