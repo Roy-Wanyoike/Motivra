@@ -531,7 +531,8 @@ func productionMounts(w *gatewayWiring) domainRoutes {
 	// Vehicles, jobs and garages: the stateful registries over the shared
 	// pool (garages rides this process exactly as in cmd/jobs).
 	vehiclesSvc := vehicles.NewService(vehicles.NewPostgresStore(w.pool), w.publisher)
-	jobsSvc := jobs.NewService(jobs.NewPostgresStore(w.pool), w.publisher)
+	jobsSvc := jobs.NewServiceWithAudit(jobs.NewPostgresStore(w.pool), w.publisher,
+		jobs.NewPostgresAuditRecorder(w.pool))
 	garageSvc := garages.NewService(garages.NewPostgresStore(w.pool), w.publisher)
 
 	// Dispatch: decision records on the shared pool when it exists (the

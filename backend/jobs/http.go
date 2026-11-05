@@ -16,11 +16,13 @@ import (
 
 // RBAC vocabulary for the jobs domain (ADR-0004). Customers create
 // requests and jobs; dispatcher/admin roles move and assign jobs;
-// technicians accept their assignments.
+// technicians accept their assignments; GARAGE reads the job board of its
+// own garage tenant (issue #165).
 const (
 	RoleCustomer   = "CUSTOMER"
 	RoleDispatcher = "DISPATCHER"
 	RoleTechnician = "TECHNICIAN"
+	RoleGarage     = "GARAGE"
 	RoleAdmin      = "ADMIN"
 	RoleSuperAdmin = "SUPER_ADMIN"
 )
@@ -29,6 +31,14 @@ const (
 // machine and to assign technicians: the platform-operator set, which also
 // defines the operator read scope.
 var dispatchRoles = OperatorRoles
+
+// listRoles are the roles allowed to call GET /v1/jobs: the platform
+// operators with their cross-resource board (issue #123) plus the GARAGE
+// organizational principal, whose page is tenant-bounded to its own garage
+// (issue #165 — the apps/garage console job board). The role gate is only
+// the coarse layer; listScope and the store predicate keep the tenant
+// boundary (ADR-0004 two-layer enforcement).
+var listRoles = []string{RoleDispatcher, RoleAdmin, RoleSuperAdmin, RoleGarage}
 
 // maxRequestBytes caps JSON request bodies accepted by the handlers.
 const maxRequestBytes int64 = 64 << 10
@@ -40,7 +50,9 @@ const maxRequestBytes int64 = 64 << 10
 //	GET  /v1/jobs?status=&technician_id=&limit=&offset
 //	                                         list jobs, optionally narrowed
 //	                                         by status/technician
-//	                                         (DISPATCHER/ADMIN/SUPER_ADMIN)
+//	                                         (DISPATCHER/ADMIN/SUPER_ADMIN —
+//	                                         unrestricted and audited;
+//	                                         GARAGE — own garage tenant only)
 //	GET  /v1/jobs/{jobID}                    fetch one job (its customer, the assigned technician, or an operator)
 //	POST /v1/jobs/{jobID}/transitions        move a job through the machine (DISPATCHER/ADMIN/SUPER_ADMIN)
 //	GET  /v1/jobs/{jobID}/transitions        read the transition audit trail (same visibility as fetching the job)
@@ -65,7 +77,7 @@ func Routes(r chi.Router, svc *Service, requireAuth func(http.HandlerFunc) http.
 		})
 	})
 	r.Route("/v1/jobs", func(r chi.Router) {
-		r.Get("/", platform.RequireRole(dispatchRoles, svc.handleListJobs))
+		r.Get("/", platform.RequireRole(listRoles, svc.handleListJobs))
 		r.Route("/{jobID}", func(r chi.Router) {
 			r.Get("/", requireAuth(svc.handleGetJob))
 			r.Get("/transitions", requireAuth(svc.handleListTransitions))
@@ -119,6 +131,36 @@ func readScope(r *http.Request) (scope ReadScope, ok bool) {
 			return ReadScope{}, false
 		}
 		scope.TenantID = &tenantID
+	}
+	return scope, true
+}
+
+// listScope derives the ReadScope for the jobs list route from the
+// validated access token — never from any client-supplied field. Platform
+// operators keep the cross-resource scope; a GARAGE caller (admitted with
+// issue #165) is an organizational principal: its tenant_id claim — the
+// garage's tenant id — is REQUIRED and becomes the sole query boundary, so
+// a garage principal can never fall through to the personal
+// customer/technician scope. A GARAGE token without a tenant claim is
+// refused with 403 (the garages-domain fail-closed convention, issue
+// #170); a malformed tenant claim fails closed as 401 via readScope. It
+// writes the error response itself and returns ok=false when the request
+// must not proceed.
+func listScope(w http.ResponseWriter, r *http.Request) (ReadScope, bool) {
+	claims, ok := platform.ClaimsFromContext(r.Context())
+	if !ok {
+		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+		return ReadScope{}, false
+	}
+	scope, ok := readScope(r)
+	if !ok {
+		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
+		return ReadScope{}, false
+	}
+	if claims.Role == RoleGarage && !scope.Operator && scope.TenantID == nil {
+		platform.WriteError(w, platform.ErrForbidden(
+			"garage job listings are bounded to the caller's own garage tenant; a tenant_id claim is required"))
+		return ReadScope{}, false
 	}
 	return scope, true
 }
@@ -414,16 +456,19 @@ func (s *Service) handleListTransitions(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleListJobs implements GET /v1/jobs?status=&technician_id=&limit=&offset.
-// The route is RBAC-gated to platform operators, and the store still scopes
-// the page by the caller (defense in depth: middleware alone is never the
-// only check, ADR-0004). status is optional — when omitted, jobs are listed
-// across every status (issue #123: the ops console board needs the
-// cross-status page) — and technician_id, when present, must be a UUID that
-// narrows the page to one technician's assignments.
+// The route is RBAC-gated to platform operators and the GARAGE role (issue
+// #165), and the store still scopes the page by the caller (defense in
+// depth: middleware alone is never the only check, ADR-0004). Operators
+// keep the unrestricted, audited cross-resource board (issue #123); a
+// GARAGE caller's page is tenant-bounded to its own garage via the scope
+// derived by listScope — never from any query parameter. status is
+// optional — when omitted, jobs are listed across every status — and
+// technician_id, when present, must be a UUID that narrows the page to one
+// technician's assignments (both filters apply inside the caller's
+// boundary).
 func (s *Service) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	scope, ok := readScope(r)
+	scope, ok := listScope(w, r)
 	if !ok {
-		platform.WriteError(w, platform.ErrUnauthorized("authentication required"))
 		return
 	}
 	query := r.URL.Query()

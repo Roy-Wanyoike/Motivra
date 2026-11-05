@@ -81,14 +81,27 @@ paths:
       operationId: listJobs
       summary: List jobs, optionally narrowed by status and technician
       description: |
-        Returns jobs newest first. Requires one of the DISPATCHER, ADMIN or
-        SUPER_ADMIN roles.
+        Returns jobs newest first. Role matrix (issue #165):
+
+        - `DISPATCHER`, `ADMIN`, `SUPER_ADMIN` (platform operators): the
+          unrestricted cross-resource job board. Every page an operator
+          pulls is audit-recorded (ADR-0004 privileged-read auditing,
+          action `jobs.job.listed`).
+        - `GARAGE` (issue #165): the partner garage's own job board. The
+          page is strictly the caller's own garage tenant — the boundary is
+          the token's `tenant_id` claim (the garage's tenant id), enforced
+          in the query layer; there is deliberately NO client-supplied
+          garage selector. A GARAGE token without a `tenant_id` claim is
+          refused with `403` (fail closed).
+        - Any other role: `403`.
 
         `status`, when present, must be one of the 18 documented statuses and
         narrows the page to that status; when omitted (issue #123) the page
         spans every status — the operator job board's cross-status view.
         `technician_id`, when present, must be a UUID and narrows the page to
-        jobs assigned to that technician; both filters AND together.
+        jobs assigned to that technician; both filters AND together and apply
+        INSIDE the caller's boundary (a garage's narrows can only ever select
+        its own tenant's rows).
       tags: [jobs]
       parameters:
         - name: status
