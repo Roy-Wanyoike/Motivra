@@ -84,6 +84,18 @@ type Candidate struct {
 	CompletionRate    float64   `json:"completion_rate"`
 	AvgCustomerRating float64   `json:"avg_customer_rating"`
 	DeclinedLast      bool      `json:"declined_last"`
+
+	// Eligibility inputs (issue #167). VerificationStatus is the
+	// technician's identity verification status as defined by the
+	// technician contract (contracts/technician/openapi.yaml, issue #166);
+	// only the exact value "verified" passes the verified-only gate — any
+	// other value, known or unknown, fails closed. ServiceAreas are the
+	// coarse area labels the technician serves (PII-HANDLING.md: coarse
+	// areas only, never precise or historical geolocation). Both fields
+	// are optional: absent status is treated as not verified by the gate,
+	// and absent areas match no constrained job area.
+	VerificationStatus string   `json:"verification_status,omitempty"`
+	ServiceAreas       []string `json:"service_areas,omitempty"`
 }
 
 // JobContext describes the job being staffed. Empty skill, make and part
@@ -93,6 +105,11 @@ type JobContext struct {
 	RequiredSkills []string `json:"required_skills"`
 	VehicleMake    string   `json:"vehicle_make"`
 	RequiredParts  []string `json:"required_parts"`
+
+	// ServiceArea is the job's coarse service-area label (issue #167),
+	// matched case-insensitively against the candidates' ServiceAreas when
+	// the require_service_area gate is on. Empty means no area constraint.
+	ServiceArea string `json:"service_area,omitempty"`
 }
 
 // Weights holds the per-factor weights. They must sum to 1.0 (see Validate)

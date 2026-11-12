@@ -93,11 +93,25 @@ type SessionStore interface {
 	// most recent token overall (zero when there is none). The pair backs
 	// the resend limit and resend cooldown respectively.
 	VerificationTokenStats(ctx context.Context, userID uuid.UUID, channel VerificationChannel, since time.Time) (count int, latest time.Time, err error)
+
+	// InsertTechnicianVerification appends one skill-verification decision
+	// record (issue #166), stamps the technician's users.verification_status
+	// and writes the platform audit_log entry — all in ONE transaction: an
+	// audit failure rolls the record and the status stamp back, so no
+	// verification decision can ever exist without its audit trail
+	// (ADR-0004 fail-closed auditing). An invalid audit entry is rejected
+	// the same way.
+	InsertTechnicianVerification(ctx context.Context, rec *TechnicianVerification, audit AuditEntry) error
+	// LatestTechnicianVerification returns the technician's newest decision
+	// record (issue #166). found is false when the technician has never
+	// been assessed; unknown technicians are indistinguishable from
+	// unassessed ones here — callers resolve existence via GetUser.
+	LatestTechnicianVerification(ctx context.Context, technicianID uuid.UUID) (rec TechnicianVerification, found bool, err error)
 }
 
 // PostgresStore implements SessionStore against the identity domain's
-// tables (users, user_roles, sessions, verification_tokens, audit_log)
-// using a pgx pool.
+// tables (users, user_roles, sessions, verification_tokens, audit_log,
+// technician_verifications) using a pgx pool.
 type PostgresStore struct {
 	pool *pgxpool.Pool
 }
@@ -230,7 +244,8 @@ func (s *PostgresStore) GetRoleGrants(ctx context.Context, userID uuid.UUID) ([]
 func (s *PostgresStore) GetUser(ctx context.Context, id uuid.UUID) (User, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT id, email, COALESCE(phone, '') AS phone, password_hash, full_name, status,
-                        email_verified_at, phone_verified_at, created_at, updated_at
+                        email_verified_at, phone_verified_at, COALESCE(verification_status, '') AS verification_status,
+                        created_at, updated_at
                  FROM users WHERE id = $1`, id)
 	u, err := scanUser(row)
 	if err != nil {
@@ -249,7 +264,8 @@ func (s *PostgresStore) GetUser(ctx context.Context, id uuid.UUID) (User, error)
 func (s *PostgresStore) GetUserByEmail(ctx context.Context, email string) (User, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT id, email, COALESCE(phone, '') AS phone, password_hash, full_name, status,
-                        email_verified_at, phone_verified_at, created_at, updated_at
+                        email_verified_at, phone_verified_at, COALESCE(verification_status, '') AS verification_status,
+                        created_at, updated_at
                  FROM users WHERE email = LOWER($1)`, strings.TrimSpace(email))
 	u, err := scanUser(row)
 	if err != nil {
@@ -279,7 +295,8 @@ func rolesFromGrants(grants []RoleGrant) []Role {
 func (s *PostgresStore) ListUsers(ctx context.Context, limit, offset int) ([]User, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, email, COALESCE(phone, '') AS phone, password_hash, full_name, status,
-                        email_verified_at, phone_verified_at, created_at, updated_at
+                        email_verified_at, phone_verified_at, COALESCE(verification_status, '') AS verification_status,
+                        created_at, updated_at
                  FROM users ORDER BY created_at DESC, id LIMIT $1 OFFSET $2`, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
@@ -346,7 +363,7 @@ func (s *PostgresStore) batchRoleGrants(ctx context.Context, ids []uuid.UUID) (m
 func scanUser(row pgx.Row) (User, error) {
 	var u User
 	err := row.Scan(&u.ID, &u.Email, &u.Phone, &u.PasswordHash, &u.FullName, &u.Status,
-		&u.EmailVerifiedAt, &u.PhoneVerifiedAt, &u.CreatedAt, &u.UpdatedAt)
+		&u.EmailVerifiedAt, &u.PhoneVerifiedAt, &u.VerificationStatus, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return User{}, ErrUserNotFound
@@ -647,4 +664,93 @@ func (s *PostgresStore) VerificationTokenStats(ctx context.Context, userID uuid.
 		return count, time.Time{}, nil
 	}
 	return count, *latest, nil
+}
+
+// technicianVerificationColumns is the shared technician_verifications
+// SELECT projection (issue #166).
+const technicianVerificationColumns = `id, technician_id, status, reason, actor_id,
+        assessment_template_id, assessment_session_id, evidence_refs, created_at`
+
+// InsertTechnicianVerification implements SessionStore: the decision record,
+// the users.verification_status stamp and the audit_log entry commit
+// together or not at all (issue #166, ADR-0004 fail-closed auditing). The
+// audit entry is validated INSIDE the transaction after the record insert —
+// an invalid entry therefore exercises the same rollback path as a runtime
+// audit failure, which is exactly what the integration suite asserts.
+func (s *PostgresStore) InsertTechnicianVerification(ctx context.Context, rec *TechnicianVerification, audit AuditEntry) error {
+	if rec == nil {
+		return fmt.Errorf("insert technician verification: record is required")
+	}
+	if rec.ID == uuid.Nil {
+		rec.ID = uuid.New()
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin insert technician verification: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO technician_verifications
+			(id, technician_id, status, reason, actor_id, assessment_template_id, assessment_session_id, evidence_refs)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		rec.ID, rec.TechnicianID, rec.Status, rec.Reason, rec.ActorID,
+		rec.AssessmentTemplateID, rec.AssessmentSessionID, rec.EvidenceRefs,
+	); err != nil {
+		return fmt.Errorf("insert technician verification record: %w", err)
+	}
+	cmd, err := tx.Exec(ctx,
+		`UPDATE users SET verification_status = $2, updated_at = now() WHERE id = $1`,
+		rec.TechnicianID, rec.Status,
+	)
+	if err != nil {
+		return fmt.Errorf("stamp technician verification status: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	metadata := audit.Metadata
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if audit.Action == "" {
+		return platform.ErrValidation("audit action is required",
+			platform.FieldError{Field: "action", Issue: "required"})
+	}
+	if audit.ObjectType == "" || audit.ObjectID == "" {
+		return platform.ErrValidation("audit object type and id are required",
+			platform.FieldError{Field: "object_type", Issue: "required"},
+			platform.FieldError{Field: "object_id", Issue: "required"})
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_log (actor_id, action, object_type, object_id, tenant_id, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		audit.ActorID, audit.Action, audit.ObjectType, audit.ObjectID, audit.TenantID, metadata,
+	); err != nil {
+		return fmt.Errorf("insert technician verification audit: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit insert technician verification: %w", err)
+	}
+	return nil
+}
+
+// LatestTechnicianVerification implements SessionStore: the technician's
+// newest decision record, or found=false when never assessed.
+func (s *PostgresStore) LatestTechnicianVerification(ctx context.Context, technicianID uuid.UUID) (TechnicianVerification, bool, error) {
+	var rec TechnicianVerification
+	err := s.pool.QueryRow(ctx,
+		`SELECT `+technicianVerificationColumns+`
+		 FROM technician_verifications WHERE technician_id = $1
+		 ORDER BY created_at DESC, id DESC LIMIT 1`, technicianID,
+	).Scan(&rec.ID, &rec.TechnicianID, &rec.Status, &rec.Reason, &rec.ActorID,
+		&rec.AssessmentTemplateID, &rec.AssessmentSessionID, &rec.EvidenceRefs, &rec.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TechnicianVerification{}, false, nil
+		}
+		return TechnicianVerification{}, false, fmt.Errorf("latest technician verification: %w", err)
+	}
+	return rec, true, nil
 }

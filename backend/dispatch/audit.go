@@ -57,6 +57,12 @@ type DecisionRecord struct {
 	CandidateCount int
 	// Weights are the weights that were applied.
 	Weights Weights
+	// Eligibility is the gate summary (issue #167) persisted into the
+	// audit metadata when the request ran the eligibility gate: which
+	// gates were enabled, how many candidates passed and every per-
+	// candidate verdict with its reasons (verification, skills, service
+	// area). Nil for legacy scoring calls without the gate.
+	Eligibility *EligibilitySummary
 }
 
 // DecisionRecorder persists one decision record. Implementations must be
@@ -104,6 +110,13 @@ func (r *PostgresDecisionRecorder) RecordDecision(ctx context.Context, record De
 	if record.JobID != nil {
 		metadata["job_id"] = record.JobID.String()
 	}
+	// Eligibility verdicts (issue #167): the explainability surface for
+	// "why was this technician (not) eligible" — verification, skills and
+	// service-area reasons ride the same decision record as the score.
+	// Bounded: candidates ≤ maxCandidatesPerRequest, labels ≤ 64/120 chars.
+	if record.Eligibility != nil {
+		metadata["eligibility"] = *record.Eligibility
+	}
 	if _, err := r.pool.Exec(ctx,
 		`INSERT INTO audit_log (actor_id, action, object_type, object_id, tenant_id, metadata)
                  VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -119,18 +132,23 @@ func (r *PostgresDecisionRecorder) RecordDecision(ctx context.Context, record De
 // encoding/json emits stable float encodings, so identical inputs always
 // hash identically; any changed input — a different candidate order
 // included, because request order is part of what was scored — changes
-// the digest.
+// the digest. The eligibility options are part of the digest too (they
+// decide who was scored); omitted entirely for ungated calls so legacy
+// digests are unchanged.
 type scoreInputs struct {
-	JobContext JobContext  `json:"job_context"`
-	Candidates []Candidate `json:"candidates"`
-	Weights    Weights     `json:"weights"`
+	JobContext  JobContext          `json:"job_context"`
+	Candidates  []Candidate         `json:"candidates"`
+	Weights     Weights             `json:"weights"`
+	Eligibility *EligibilityOptions `json:"eligibility,omitempty"`
 }
 
 // InputsHash returns the SHA-256 hex digest of the canonical inputs that
 // produced a decision. The applied weights are part of the digest, so a
 // re-score under different weights is never conflated with the original.
-func InputsHash(job JobContext, candidates []Candidate, applied Weights) string {
-	b, err := json.Marshal(scoreInputs{JobContext: job, Candidates: candidates, Weights: applied})
+// eligibility is the gate configuration of the call (nil when the request
+// ran no gate — issue #167).
+func InputsHash(job JobContext, candidates []Candidate, applied Weights, eligibility *EligibilityOptions) string {
+	b, err := json.Marshal(scoreInputs{JobContext: job, Candidates: candidates, Weights: applied, Eligibility: eligibility})
 	if err != nil { // unreachable for this plain-data shape; stay total
 		return ""
 	}

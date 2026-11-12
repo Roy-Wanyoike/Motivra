@@ -15,6 +15,10 @@ coverage.out
 .env.*
 !.env.example
 
+# --- Pexafy asset pipeline (issue #196): local key file — PEXAFY_API_KEY never committed ---
+.env.pexafy
+.env.pexafy.*
+
 # --- Logs ---
 *.log
 

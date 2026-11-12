@@ -80,15 +80,25 @@ type JobAssignedPayload struct {
 // Service is the jobs domain service. It owns the state-machine discipline:
 // every status move goes through CanTransition before it touches the store,
 // and every successful mutation publishes a domain event. publisher may be
-// nil (tests, offline tooling); events are simply skipped then.
+// nil (tests, offline tooling); events are simply skipped then. audit may
+// be nil too; when wired it records the ADR-0004 privileged-read trail of
+// the operator job board (issue #165), and a failed record fails the read.
 type Service struct {
 	store     Store
 	publisher platform.Publisher
+	audit     AuditRecorder
 }
 
 // NewService returns a Service over store. publisher may be nil.
 func NewService(store Store, publisher platform.Publisher) *Service {
 	return &Service{store: store, publisher: publisher}
+}
+
+// NewServiceWithAudit returns a Service that additionally records the
+// operator job board's privileged reads through audit (ADR-0004). Passing
+// a nil recorder is the documented un-audited posture (tests, tooling).
+func NewServiceWithAudit(store Store, publisher platform.Publisher, audit AuditRecorder) *Service {
+	return &Service{store: store, publisher: publisher, audit: audit}
 }
 
 // CreateRequest validates and persists a new service request and publishes
@@ -279,6 +289,12 @@ func (s *Service) Transitions(ctx context.Context, jobID uuid.UUID, scope ReadSc
 // service's pagination discipline (defaults and caps), limited to what
 // scope can see. A nil Status in the filter lists every status; a nil
 // TechnicianID lists every assignment state (issue #123: operator board).
+// An operator listing is a privileged cross-tenant read of customer-linked
+// rows and is audited when a recorder is wired (ADR-0004, issue #165): the
+// record carries the acting principal, their tenant scope and the exact
+// page shape, and a failed audit record fails the request so the read
+// signal can never be lost silently. GARAGE and personal pages are
+// tenant-bounded reads, not privileged ones, and are not audited.
 func (s *Service) Jobs(ctx context.Context, filter JobFilter, limit, offset int, scope ReadScope) ([]Job, error) {
 	if filter.Status != nil && !isKnownStatus(*filter.Status) {
 		return nil, fmt.Errorf("jobs: list jobs: unknown status %q", *filter.Status)
@@ -295,6 +311,19 @@ func (s *Service) Jobs(ctx context.Context, filter JobFilter, limit, offset int,
 	jobs, err := s.store.ListJobs(ctx, filter, limit, offset, scope)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: list jobs: %w", err)
+	}
+	if s.audit != nil && scope.Operator {
+		record := ListAuditRecord{
+			ActorID:  scope.ViewerID,
+			TenantID: scope.TenantID,
+			Filter:   filter,
+			Limit:    limit,
+			Offset:   offset,
+			Returned: len(jobs),
+		}
+		if err := s.audit.RecordJobsListed(ctx, record); err != nil {
+			return nil, fmt.Errorf("jobs: audit %s: %w", ActionJobsListed, err)
+		}
 	}
 	return jobs, nil
 }

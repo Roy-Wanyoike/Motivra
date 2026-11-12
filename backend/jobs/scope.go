@@ -18,7 +18,9 @@ import "github.com/google/uuid"
 //     are visible. Isolation derives from the tenant_id columns added by
 //     jobs migration 000006 (issue #88) — a tenant-mate's rows are within
 //     the organization's boundary by design, and NO row of another tenant
-//     ever matches.
+//     ever matches. The GARAGE role's list admission (issue #165) is this
+//     boundary: the garage console reads only its own garage tenant's
+//     jobs, with the tenant claim required (fail closed without one).
 //   - TenantID nil and ViewerID set: a personal principal; rows they own
 //     (customer_id) or are assigned (technician_id). This remains the
 //     enforceable scope for rows created before tenancy landed (their

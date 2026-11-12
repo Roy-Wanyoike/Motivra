@@ -28,8 +28,14 @@ const (
 	// maxListEntries caps repeated fields inside a candidate or job context.
 	maxListEntries = 50
 
-	// maxStringEntryLength caps a single skill, make or part label.
+	// maxStringEntryLength caps a single skill, make, part or verification
+	// status label.
 	maxStringEntryLength = 64
+
+	// maxServiceAreaLength caps a coarse service-area label. It matches the
+	// technician contract's area_name cap (contracts/technician,
+	// issue #166) so a composed "county/area" label needs no truncation.
+	maxServiceAreaLength = 120
 )
 
 // Routes registers the dispatch scoring HTTP API on r:
@@ -56,19 +62,27 @@ func Routes(r chi.Router, require func(http.HandlerFunc) http.HandlerFunc, recor
 // scoreRequest is the POST /v1/dispatch/score body. Weights are optional:
 // when omitted the engine applies DefaultWeights. job_id is optional
 // attribution (issue #88): when set, the persisted decision record links
-// the scoring to the job being staffed.
+// the scoring to the job being staffed. eligibility (issue #167) is
+// optional: when set, its gates run BEFORE scoring and excluded
+// candidates receive verdicts instead of scores; when omitted the
+// pre-#167 behaviour is preserved exactly.
 type scoreRequest struct {
-	JobID      *uuid.UUID  `json:"job_id,omitempty"`
-	JobContext JobContext  `json:"job_context"`
-	Candidates []Candidate `json:"candidates"`
-	Weights    *Weights    `json:"weights,omitempty"`
+	JobID       *uuid.UUID          `json:"job_id,omitempty"`
+	JobContext  JobContext          `json:"job_context"`
+	Candidates  []Candidate         `json:"candidates"`
+	Weights     *Weights            `json:"weights,omitempty"`
+	Eligibility *EligibilityOptions `json:"eligibility,omitempty"`
 }
 
 // scoreResponse is the POST /v1/dispatch/score reply. The applied weights
-// are echoed so every response is self-describing.
+// are echoed so every response is self-describing. The eligibility
+// summary is present only when the request configured the gate (issue
+// #167): it reports every candidate's verdict with the matching reasons
+// (verification, skills, service area), including the excluded ones.
 type scoreResponse struct {
-	Weights Weights `json:"weights"`
-	Scores  []Score `json:"scores"`
+	Weights     Weights             `json:"weights"`
+	Scores      []Score             `json:"scores"`
+	Eligibility *EligibilitySummary `json:"eligibility,omitempty"`
 }
 
 // factorCatalogueResponse is the GET /v1/dispatch/factors reply.
@@ -154,12 +168,23 @@ func computeScores(r *http.Request) (scoreRequest, scoreResponse, error) {
 		return scoreRequest{}, scoreResponse{}, platform.ErrValidation("request contains invalid fields", fieldErrs...)
 	}
 
+	// The eligibility gate (issue #167) runs before scoring: excluded
+	// candidates are never scored-and-then-demoted. Without the block the
+	// engine scores every candidate — the pre-#167 contract, unchanged.
+	if req.Eligibility != nil {
+		scores, summary := ScoreEligibleCandidates(req.Candidates, req.JobContext, weights, *req.Eligibility)
+		return req, scoreResponse{Weights: weights, Scores: scores, Eligibility: &summary}, nil
+	}
 	return req, scoreResponse{Weights: weights, Scores: ScoreCandidates(req.Candidates, req.JobContext, weights)}, nil
 }
 
 // decisionRecordFromRequest assembles the audited decision record: full
 // attribution comes from the validated access-token claims (never from
-// client input); the chosen technician is the engine's top-ranked score.
+// client input); the chosen technician is the engine's top-ranked ELIGIBLE
+// score. When the eligibility gate excluded every candidate the decision
+// is still recorded — with no chosen technician (the zero UUID) and the
+// eligibility verdicts in the metadata — so the audit trail answers "why
+// was nobody recommended" (issue #167).
 func decisionRecordFromRequest(r *http.Request, req scoreRequest, resp scoreResponse) (DecisionRecord, error) {
 	claims, ok := platform.ClaimsFromContext(r.Context())
 	if !ok {
@@ -177,17 +202,21 @@ func decisionRecordFromRequest(r *http.Request, req scoreRequest, resp scoreResp
 		}
 		tenant = &parsed
 	}
-	chosen := resp.Scores[0] // scores are sorted by total descending; candidates >= 1 is validated
+	var chosen Score
+	if len(resp.Scores) > 0 {
+		chosen = resp.Scores[0] // scores are sorted by total descending; only eligible candidates are scored
+	}
 	return DecisionRecord{
 		DecisionID:         uuid.New(),
 		ActorID:            actor,
 		TenantID:           tenant,
 		JobID:              req.JobID,
-		InputsHash:         InputsHash(req.JobContext, req.Candidates, resp.Weights),
+		InputsHash:         InputsHash(req.JobContext, req.Candidates, resp.Weights, req.Eligibility),
 		ChosenTechnicianID: chosen.TechnicianID,
 		ChosenScore:        chosen.Total,
 		CandidateCount:     len(req.Candidates),
 		Weights:            resp.Weights,
+		Eligibility:        resp.Eligibility,
 	}, nil
 }
 
@@ -209,6 +238,12 @@ func validateJobContext(j JobContext) []platform.FieldError {
 		errs = append(errs, platform.FieldError{
 			Field: "job_context.vehicle_make",
 			Issue: fmt.Sprintf("must be at most %d characters", maxStringEntryLength),
+		})
+	}
+	if len(j.ServiceArea) > maxServiceAreaLength {
+		errs = append(errs, platform.FieldError{
+			Field: "job_context.service_area",
+			Issue: fmt.Sprintf("must be at most %d characters", maxServiceAreaLength),
 		})
 	}
 	return errs
@@ -246,6 +281,19 @@ func validateCandidates(candidates []Candidate) []platform.FieldError {
 		}
 		errs = append(errs, validateStringList(field("skills"), c.Skills)...)
 		errs = append(errs, validateStringList(field("vehicle_makes"), c.VehicleMakes)...)
+		errs = append(errs, validateStringList(field("service_areas"), c.ServiceAreas)...)
+		// The verification status is deliberately NOT enum-validated here:
+		// the vocabulary is owned by the identity technician contract
+		// (issue #166) and may grow (e.g. a rejected state). The gate only
+		// needs "verified" to mean verified; anything else fails closed.
+		// Only the label size is bounded so a broken producer cannot bloat
+		// the request or the audit metadata.
+		if len(c.VerificationStatus) > maxStringEntryLength {
+			errs = append(errs, platform.FieldError{
+				Field: field("verification_status"),
+				Issue: fmt.Sprintf("must be at most %d characters", maxStringEntryLength),
+			})
+		}
 	}
 	return errs
 }

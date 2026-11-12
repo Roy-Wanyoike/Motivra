@@ -96,6 +96,36 @@ are never assembled with missing evidence hashes** (database trigger
 `evidence_match`, `template_match`) instead of erroring — tampering is a
 verdict, not an exception.
 
+## Human report verification (issue #185)
+
+The machine recomputation above is integrity math; a *human* reviewer
+records the actual verdict through `RecordVerificationOutcome`
+(`verification.go`):
+
+- **Roles**: GARAGE, ADMIN, SUPER_ADMIN (`VerificationReviewerRoles`).
+  TECHNICIAN and DISPATCHER are denied at the route (403) — the capturing
+  inspector never verifies their own work (separation of duties); the
+  guard is enforced again by identity inside the service
+  (`ErrSelfVerification`), so even a role escalation cannot self-verify.
+- **State guard**: the session must be REPORT_AVAILABLE (else 409). The
+  database trigger
+  `inspection_report_verifications_require_report_available` enforces the
+  same rule against raw SQL.
+- **Integrity precondition**: VERIFIED requires the current recomputation
+  to answer `verified: true`, else 409 naming every failed check.
+  REJECTED is always allowed on a REPORT_AVAILABLE report and records the
+  snapshot as observed.
+- **Append-only audit**: every decision inserts
+  `inspection_report_verifications` AND its `audit_log` entry (actor,
+  report, outcome, full integrity snapshot) in ONE transaction — an audit
+  failure fails the request and rolls the record back, so no decision can
+  ever exist without its trail (ADR-0004). Corrections are new records;
+  the newest per report wins.
+- **Events**: `report.verified.v1` / `report.rejected.v1` publish on the
+  inspections domain after commit.
+- `expected_report_version` gives the console an optimistic-concurrency
+  guard against verifying a report whose version moved underneath it.
+
 ## HTTP API (v1)
 
 | Method | Path | Who | Purpose |
@@ -112,6 +142,8 @@ verdict, not an exception.
 | POST | /v1/inspections/sessions/{id}/report | staff roles | assemble + issue the report |
 | GET | /v1/inspections/sessions/{id}/report | authenticated | fetch the report |
 | GET | /v1/inspections/sessions/{id}/report/verification | authenticated | recompute report integrity |
+| POST | /v1/inspections/sessions/{id}/report/verification/outcome | GARAGE, ADMIN, SUPER_ADMIN | record the human verdict (append-only + audit) |
+| GET | /v1/inspections/sessions/{id}/report/verification/records | authenticated | verification trail (oldest first) |
 | GET | /v1/inspections/templates?vehicle_class= | authenticated | list the template registry |
 | GET | /v1/inspections/templates/{id} | authenticated | fetch one template |
 
@@ -132,6 +164,8 @@ sentinels `ErrConflict`, `ErrSessionSealed`, `ErrReportIncomplete`,
 | `session.started.v1` | the inspector starts the walk |
 | `session.submitted.v1` | the session is sealed (payload carries findings/evidence counts) |
 | `report.issued.v1` | the verifiable report is issued (payload carries the content hash) |
+| `report.verified.v1` | a reviewer marks the report VERIFIED (issue #185) |
+| `report.rejected.v1` | a reviewer marks the report REJECTED (issue #185) |
 
 Subjects follow `motivra.inspections.<aggregate>.<event>.v1` (ADR-0002).
 `cmd/inspections` constructs a `platform.NATSPublisher` when
@@ -183,9 +217,13 @@ shutdown. The database is required at boot (reports are authoritative).
 - Never bypass `CanTransition` — no direct status writes in SQL, handlers
   or consumers.
 - Never update or delete `inspection_findings`, `inspection_evidence`,
-  `inspection_reports` or `inspection_session_transitions` rows; all four
-  are append-only by database trigger, and corrections are new records.
+  `inspection_reports`, `inspection_session_transitions` or
+  `inspection_report_verifications` rows; all five are append-only by
+  database trigger, and corrections are new records.
 - Never record findings or evidence on a session that is not IN_PROGRESS.
+- Never record a verification verdict outside REPORT_AVAILABLE, for the
+  capturing inspector, or without its audit_log row — the transaction
+  refuses all three.
 - Never assemble a report without evidence hashes — the readiness check
   and the database trigger both refuse.
 - Never accept the inspector identity, tenant or captured-by from client

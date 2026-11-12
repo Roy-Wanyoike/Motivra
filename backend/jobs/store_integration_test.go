@@ -126,6 +126,7 @@ func TestJobLifecycleIntegration(t *testing.T) {
 	require.Equal(t, "technician accepted assignment", transitions[3].Reason)
 	for i, tr := range transitions {
 		require.False(t, tr.CreatedAt.IsZero(), "transition %d must carry its row timestamp", i)
+		require.Nil(t, tr.TenantID, "transition %d of a personal job carries a NULL tenant (issue #209: tenant_id must be scanned)", i)
 	}
 
 	// Scoped listing at the SQL level: the customer sees the job, the
@@ -275,6 +276,10 @@ func TestJobTenantIsolationIntegration(t *testing.T) {
 	trailA, err := store.ListTransitions(ctx, jobA.ID, tenantScope(tenantA))
 	require.NoError(t, err)
 	require.Len(t, trailA, 2, "the tenant reads its own trail (transition + assignment)")
+	for i, tr := range trailA {
+		require.NotNil(t, tr.TenantID, "trail row %d must carry the denormalized tenant_id (issue #209)", i)
+		require.Equal(t, tenantA, *tr.TenantID, "trail row %d is stamped with the job's tenant", i)
+	}
 	trailB, err := store.ListTransitions(ctx, jobA.ID, tenantScope(tenantB))
 	require.NoError(t, err)
 	assert.Empty(t, trailB, "another tenant reads an empty trail")
@@ -315,3 +320,69 @@ func seedRequestAndJobForTenant(t *testing.T, svc *Service, customerID uuid.UUID
 	require.NoError(t, err)
 	return job
 }
+
+// TestGarageScopedListIsolationIntegration is the SQL-level proof of the
+// issue #165 merge gate (the #124 two-garage case): the unfiltered
+// ListJobs page for a GARAGE-shaped scope (TenantID set, not an operator)
+// contains strictly its own garage tenant's rows — no cross-garage row
+// ever matches, with or without the status/technician narrows.
+func TestGarageScopedListIsolationIntegration(t *testing.T) {
+	svc, store := integrationStore(t)
+	ctx := t.Context()
+
+	tenantA, tenantB := uuid.New(), uuid.New()
+	jobA1 := seedRequestAndJobForTenant(t, svc, uuid.New(), &tenantA)
+	jobA2 := seedRequestAndJobForTenant(t, svc, uuid.New(), &tenantA)
+	jobB := seedRequestAndJobForTenant(t, svc, uuid.New(), &tenantB)
+
+	// The garage scope is exactly what listScope derives for a GARAGE
+	// token: ViewerID set (the organizational principal's subject), the
+	// tenant claim as the sole boundary, and never the operator bit.
+	garageA := ReadScope{ViewerID: uuid.New(), TenantID: &tenantA}
+	garageB := ReadScope{ViewerID: uuid.New(), TenantID: &tenantB}
+
+	pageA, err := store.ListJobs(ctx, JobFilter{}, 50, 0, garageA)
+	require.NoError(t, err)
+	require.Len(t, pageA, 2, "garage A's page holds exactly its own two jobs")
+	for _, j := range pageA {
+		require.Equal(t, tenantA, *j.TenantID, "every returned row belongs to garage A's tenant")
+	}
+
+	pageB, err := store.ListJobs(ctx, JobFilter{}, 50, 0, garageB)
+	require.NoError(t, err)
+	require.Len(t, pageB, 1, "garage B's page holds exactly its own job")
+	require.Equal(t, jobB.ID, pageB[0].ID)
+	require.Equal(t, tenantB, *pageB[0].TenantID)
+
+	// The narrows compose inside the boundary: garage B asking for a
+	// technician (or status) it does not hold yields an empty page, never
+	// garage A's rows.
+	techA := uuid.New()
+	require.NoError(t, svc.Transition(ctx, jobA1.ID, StatusTriaging, nil, "triage", opScope()))
+	require.NoError(t, svc.Transition(ctx, jobA1.ID, StatusDispatching, nil, "dispatch", opScope()))
+	require.NoError(t, svc.AssignTechnician(ctx, jobA1.ID, techA, nil, opScope()))
+
+	narrowed, err := store.ListJobs(ctx, JobFilter{TechnicianID: &techA}, 50, 0, garageB)
+	require.NoError(t, err)
+	assert.Empty(t, narrowed, "garage B's technician narrow must not surface garage A's assignment")
+
+	byStatus, err := store.ListJobs(ctx, JobFilter{Status: ptrStatus(StatusAssigned)}, 50, 0, garageB)
+	require.NoError(t, err)
+	assert.Empty(t, byStatus, "garage B's status narrow must not surface garage A's assigned job")
+
+	byStatusA, err := store.ListJobs(ctx, JobFilter{Status: ptrStatus(StatusAssigned)}, 50, 0, garageA)
+	require.NoError(t, err)
+	require.Len(t, byStatusA, 1)
+	require.Equal(t, jobA1.ID, byStatusA[0].ID)
+
+	// The second garage A row is untouched by the dispatch flow.
+	createdA, err := store.ListJobs(ctx, JobFilter{Status: ptrStatus(StatusCreated)}, 50, 0, garageA)
+	require.NoError(t, err)
+	require.Len(t, createdA, 1)
+	require.Equal(t, jobA2.ID, createdA[0].ID)
+
+	pgtest.Truncate(t, store.pool, jobsTables...)
+}
+
+// ptrStatus returns a pointer to s (JobFilter.Status helper).
+func ptrStatus(s Status) *Status { return &s }

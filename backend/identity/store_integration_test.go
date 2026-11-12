@@ -14,7 +14,7 @@ import (
 
 // identityTables are every table of the identity chain, truncated between
 // tests so each starts from a clean schema.
-var identityTables = []string{"audit_log", "verification_tokens", "sessions", "user_roles", "users"}
+var identityTables = []string{"technician_verifications", "audit_log", "verification_tokens", "sessions", "user_roles", "users"}
 
 // integrationPool connects to the Postgres instance named by
 // TEST_DATABASE_URL through the shared pgtest harness (issue #28, deferral
