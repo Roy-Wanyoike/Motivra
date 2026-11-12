@@ -21,6 +21,15 @@ servers:
 tags:
   - name: capacity
     description: Declared service capacity of the caller's own garage
+  - name: appointments
+    description: |
+      The appointment calendar tied to service requests (issue #169). An
+      appointment is a one-hour slot a garage holds for a job, opened as
+      `requested` and moved through explicit transitions only
+      (`requested → confirmed → completed`, `cancelled` from
+      requested/confirmed, `no_show` from confirmed; terminal states are
+      immutable). Every lifecycle change appends an audit_log row in the
+      same transaction.
 security:
   - bearerAuth: []
 paths:
@@ -81,7 +90,228 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/ValidationError'
+  /v1/garages/{garageID}/appointments:
+    post:
+      operationId: createGarageAppointment
+      summary: Open an appointment against a garage
+      description: |
+        Opens an appointment for a service request/job in status
+        `requested`. A CUSTOMER books against the addressed garage; a
+        GARAGE principal books in its own tenant (the addressed tenant must
+        equal the token's `tenant_id` claim). The slot is validated
+        server-side against the garage's declared capacity (issue #170):
+        the garage must have declared bays and technician slots,
+        `scheduled_for` must be in the future and its wall clock (the
+        offset the client declared in the RFC 3339 instant) must fit inside
+        the operating hours with the full one-hour slot. Double booking is
+        rejected 409 by a transactional check plus a database EXCLUDE
+        constraint (same tenant + bay, overlapping active slots).
+      tags: [appointments]
+      parameters:
+        - $ref: '#/components/parameters/GarageID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppointmentInput'
+      responses:
+        '201':
+          description: The created appointment (status `requested`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    get:
+      operationId: listGarageAppointments
+      summary: Read a garage's calendar window
+      description: |
+        The tenant-scoped calendar window read. GARAGE staff read their own
+        tenant only (the addressed garage must equal the token's
+        `tenant_id` claim); platform operators read the addressed tenant
+        under the ADR-0004 cross-tenant read obligation. Ordered by
+        `scheduled_for`, newest first.
+      tags: [appointments]
+      parameters:
+        - $ref: '#/components/parameters/GarageID'
+        - name: from
+          in: query
+          description: Window start (inclusive, RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Window end (exclusive, RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: status
+          in: query
+          description: Filter by lifecycle status.
+          schema:
+            $ref: '#/components/schemas/AppointmentStatus'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: The appointments inside the window (possibly empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Appointment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /v1/appointments/{appointmentID}:
+    get:
+      operationId: getAppointment
+      summary: Read one appointment
+      description: |
+        Own-tenant read for GARAGE principals, cross-tenant read for
+        platform operators. A tenant the scope does not satisfy is
+        indistinguishable from a missing row (404).
+      tags: [appointments]
+      parameters:
+        - $ref: '#/components/parameters/AppointmentID'
+      responses:
+        '200':
+          description: The appointment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Appointment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/appointments/{appointmentID}/confirm:
+    post:
+      operationId: confirmAppointment
+      summary: Confirm a requested appointment
+      description: |
+        `requested → confirmed`. Performed by the owning garage's GARAGE
+        principal; ADMIN/SUPER_ADMIN may override across tenants (the
+        override is stamped into the audit row). Any other source status is
+        a 409.
+      tags: [appointments]
+      parameters:
+        - $ref: '#/components/parameters/AppointmentID'
+      responses:
+        '200':
+          $ref: '#/components/responses/AppointmentOK'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/appointments/{appointmentID}/complete:
+    post:
+      operationId: completeAppointment
+      summary: Complete a confirmed appointment
+      description: |
+        `confirmed → completed` (terminal). Same RBAC as confirm.
+      tags: [appointments]
+      parameters:
+        - $ref: '#/components/parameters/AppointmentID'
+      responses:
+        '200':
+          $ref: '#/components/responses/AppointmentOK'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/appointments/{appointmentID}/cancel:
+    post:
+      operationId: cancelAppointment
+      summary: Cancel a requested or confirmed appointment
+      description: |
+        `requested|confirmed → cancelled` (terminal). Same RBAC as confirm.
+      tags: [appointments]
+      parameters:
+        - $ref: '#/components/parameters/AppointmentID'
+      responses:
+        '200':
+          $ref: '#/components/responses/AppointmentOK'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/appointments/{appointmentID}/no-show:
+    post:
+      operationId: noShowAppointment
+      summary: Mark a confirmed appointment as a no-show
+      description: |
+        `confirmed → no_show` (terminal). Same RBAC as confirm.
+      tags: [appointments]
+      parameters:
+        - $ref: '#/components/parameters/AppointmentID'
+      responses:
+        '200':
+          $ref: '#/components/responses/AppointmentOK'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 components:
+  parameters:
+    GarageID:
+      name: garageID
+      in: path
+      required: true
+      description: The garage tenant the appointment belongs to.
+      schema:
+        type: string
+        format: uuid
+    AppointmentID:
+      name: appointmentID
+      in: path
+      required: true
+      description: The appointment identifier.
+      schema:
+        type: string
+        format: uuid
   responses:
     Unauthorized:
       description: Missing, invalid or expired access token.
@@ -104,6 +334,28 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Error'
+    Conflict:
+      description: |
+        The request conflicts with the current state: an invalid status
+        transition, or a slot that is no longer available (double booking).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: |
+        No such resource for the caller's scope — a row the scope does not
+        satisfy is indistinguishable from a missing one.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    AppointmentOK:
+      description: The updated appointment.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Appointment'
   securitySchemes:
     bearerAuth:
       type: http
@@ -157,6 +409,68 @@ components:
           format: uuid
           nullable: true
           description: Principal that last wrote the record; omitted while unwritten.
+    AppointmentStatus:
+      type: string
+      description: |
+        The appointment lifecycle state. Explicit transitions only:
+        `requested → confirmed → completed`; `cancelled` from
+        requested/confirmed; `no_show` from confirmed. Terminal states are
+        immutable.
+      enum: [requested, confirmed, completed, cancelled, no_show]
+    AppointmentInput:
+      type: object
+      required: [job_id, scheduled_for]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: The referenced service request/job — by ID only.
+        scheduled_for:
+          type: string
+          format: date-time
+          description: |
+            The slot start (RFC 3339). Must be in the future; the wall
+            clock of the declared offset must fit inside the garage's
+            operating hours with the full one-hour slot.
+        bay:
+          type: string
+          maxLength: 64
+          description: Optional service-lane label; omitted means the garage's general pool.
+        notes:
+          type: string
+          maxLength: 1024
+          description: Optional free-text handling notes.
+    Appointment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          format: uuid
+          description: The referenced service request/job — by ID only.
+        garage_tenant_id:
+          type: string
+          format: uuid
+          description: The owning garage organization.
+        scheduled_for:
+          type: string
+          format: date-time
+        bay:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/AppointmentStatus'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     Error:
       type: object
       description: RFC 7807-style problem document (application/problem+json).
