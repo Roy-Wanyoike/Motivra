@@ -17,6 +17,17 @@ info:
     platform's write-once audit trail (actor, tenant, inputs hash, chosen
     technician, score — issue #88), queryable by operators through
     `GET /v1/admin/audit` (action `dispatch.decision.scored`).
+
+    Verified-only eligibility (issue #167): a request MAY configure an
+    `eligibility` block whose hard gates run BEFORE scoring —
+    `verified_only` (identity verification status must equal `verified`,
+    per the technician contract), `require_skills` (candidate skills must
+    intersect the job's required skills) and `require_service_area`
+    (candidate must serve the job's coarse service-area label). Excluded
+    candidates receive no score; every evaluated candidate receives an
+    explainable verdict (facts + reasons) that is echoed in the response
+    and persisted in the decision record's audit metadata. The gate fails
+    closed: a missing verification status is treated as not verified.
 servers:
   - url: /
 tags:
@@ -41,6 +52,14 @@ paths:
         summing to 1.0. The candidate list is capped at 200 entries; the
         engine is advisory only and never assigns or reassigns a job.
 
+        When an `eligibility` block is present (issue #167), its gates run
+        BEFORE scoring: candidates failing an enabled gate are excluded
+        and receive no score, and the response carries an `eligibility`
+        summary with every candidate's verdict and matching reasons
+        (verification, skills, service area). Excluded candidates can
+        therefore never be the recommendation. Without the block every
+        candidate is scored — the pre-#167 behaviour, unchanged.
+
         `job_id` is optional attribution: when set (a non-zero UUID), the
         persisted decision record links the scoring to the job being
         staffed. Invalid `job_id` values are rejected with 422 and record
@@ -54,7 +73,11 @@ paths:
               $ref: '#/components/schemas/ScoreRequest'
       responses:
         '200':
-          description: Scores computed. The applied weights are echoed in the response.
+          description: |-
+            Scores computed. The applied weights are echoed in the response.
+            When the request configured the eligibility gate, only eligible
+            candidates are scored and the response carries the eligibility
+            summary (verdicts + reasons for every evaluated candidate).
           content:
             application/json:
               schema:
@@ -72,7 +95,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Validation failure (weight sum, candidate ranges or caps, label sizes, non-UUID or zero job_id).
+          description: Validation failure (weight sum, candidate ranges or caps, label sizes — including verification status (64 chars) and service-area labels (120 chars) —, non-UUID or zero job_id).
           content:
             application/problem+json:
               schema:
@@ -137,6 +160,16 @@ components:
             Optional per-factor weights. All values must be non-negative and
             sum to 1.0; omitted to use the engine defaults.
           $ref: '#/components/schemas/Weights'
+        eligibility:
+          description: |
+            Optional hard eligibility gate applied before scoring (issue
+            #167). When present, its enabled gates exclude candidates
+            before any scoring happens; when omitted, no gate runs and
+            every candidate is scored (pre-#167 behaviour). Excluded
+            candidates are never scored and can never be the
+            recommendation — issue #126: unverified technicians receive no
+            dispatched jobs.
+          $ref: '#/components/schemas/EligibilityOptions'
     JobContext:
       type: object
       description: The job being staffed. Empty lists are "no constraint" and never penalize a candidate.
@@ -155,6 +188,16 @@ components:
           description: Parts the job needs on the van. At most 50 entries of 64 characters.
           items:
             type: string
+        service_area:
+          type: string
+          maxLength: 120
+          description: |-
+            The job's COARSE service-area label (e.g. "Westlands" or
+            "Nairobi/Westlands"), matched case-insensitively against the
+            candidates' service_areas when the require_service_area gate is
+            enabled. Empty means no area constraint. Per docs/PII-HANDLING.md
+            this is a coarse area only — never coordinates or location
+            history.
     Candidate:
       type: object
       required:
@@ -227,6 +270,33 @@ components:
         declined_last:
           type: boolean
           description: Whether the technician declined the previous dispatch offer.
+        verification_status:
+          type: string
+          maxLength: 64
+          description: |-
+            The technician's identity verification status, as defined by the
+            technician contract (contracts/technician/openapi.yaml,
+            VerificationState: unverified | assessment_pending | verified —
+            issue #166). Only the exact value `verified` passes the
+            verified-only gate; any other value — including values the
+            identity contract may add later — fails closed, and a missing
+            status is treated as not verified. Deliberately not
+            enum-validated here: identity owns the vocabulary (ADR-0002
+            producers own schemas); dispatch only needs "verified" to mean
+            verified.
+        service_areas:
+          type: array
+          description: |-
+            COARSE service-area labels the technician serves (e.g.
+            "Westlands"), matched case-insensitively against the job's
+            service_area by the require_service_area gate. Per
+            docs/PII-HANDLING.md: coarse areas only — precise or historical
+            geolocation is never consumed by dispatch. At most 50 entries
+            of 120 characters.
+          maxItems: 50
+          items:
+            type: string
+            maxLength: 120
     Weights:
       type: object
       description: Per-factor weights. Non-negative and summing to 1.0.
@@ -270,9 +340,19 @@ components:
           $ref: '#/components/schemas/Weights'
         scores:
           type: array
-          description: Scores sorted by total descending, ties broken by ascending technician ID.
+          description: >-
+            Scores sorted by total descending, ties broken by ascending
+            technician ID. When the eligibility gate ran, only eligible
+            candidates appear here (excluded candidates are never scored).
           items:
             $ref: '#/components/schemas/Score'
+        eligibility:
+          description: >-
+            Present only when the request configured the eligibility gate
+            (issue #167): every evaluated candidate's verdict with the
+            matching reasons. Also persisted in the decision record's audit
+            metadata.
+          $ref: '#/components/schemas/EligibilitySummary'
     Score:
       type: object
       required: [technician_id, total, factors, top_reasons]
@@ -342,6 +422,103 @@ components:
         default_weight:
           type: number
           format: double
+    EligibilityOptions:
+      type: object
+      description: >-
+        Which eligibility gates run before scoring (issue #167). Each flag
+        opts one gate in; all disabled (or the block omitted) means no
+        gate. Gates are hard exclusions, not weighted factors — the design
+        decision is recorded in backend/dispatch/README.md and echoed in
+        every verdict.
+      properties:
+        verified_only:
+          type: boolean
+          description: >-
+            Only technicians whose verification status equals `verified`
+            are eligible (issue #126: unverified technicians receive no
+            dispatched jobs). A missing status fails closed.
+        require_skills:
+          type: boolean
+          description: >-
+            The candidate's skills must intersect the job's required skills
+            (at least one match; intersection semantics, documented in the
+            PR — partial coverage is still down-weighted by the
+            technical_fit factor). A job with no required skills imposes no
+            constraint.
+        require_service_area:
+          type: boolean
+          description: >-
+            The candidate must serve the job's coarse service-area label
+            (case-insensitive). A job with no service area imposes no
+            constraint.
+    EligibilitySummary:
+      type: object
+      description: The eligibility gate's outcome for one scoring call (issue #167).
+      required:
+        - verified_only
+        - require_skills
+        - require_service_area
+        - evaluated_count
+        - eligible_count
+        - excluded_count
+        - verdicts
+      properties:
+        verified_only:
+          type: boolean
+        require_skills:
+          type: boolean
+        require_service_area:
+          type: boolean
+        evaluated_count:
+          type: integer
+          minimum: 0
+          description: How many candidates the gate evaluated (the request's candidate count).
+        eligible_count:
+          type: integer
+          minimum: 0
+        excluded_count:
+          type: integer
+          minimum: 0
+        verdicts:
+          type: array
+          description: One verdict per evaluated candidate, in request order (candidate order is part of what was scored).
+          items:
+            $ref: '#/components/schemas/EligibilityVerdict'
+    EligibilityVerdict:
+      type: object
+      description: >-
+        Explainable eligibility outcome for one candidate: the raw facts
+        (independent of which gates ran) plus one human-readable reason per
+        ENABLED gate, in the fixed order verification → skills → area.
+        Reasons name labels and statuses only — never personal data.
+      required:
+        - technician_id
+        - eligible
+        - verified
+        - skills_match
+        - area_match
+        - reasons
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+        eligible:
+          type: boolean
+          description: True only when the candidate passes every enabled gate. Excluded candidates receive no score.
+        verified:
+          type: boolean
+          description: Raw fact — the verification status equals `verified`.
+        skills_match:
+          type: boolean
+          description: Raw fact — the candidate's skills intersect the job's required skills (always true when the job names no skills).
+        area_match:
+          type: boolean
+          description: Raw fact — the candidate serves the job's service area (always true when the job names no area).
+        reasons:
+          type: array
+          description: One explanation per enabled gate, e.g. "verification status is verified", "skills match job requirements (engine)", "serves job service area (Westlands)".
+          items:
+            type: string
     Error:
       type: object
       description: RFC 7807-style problem detail (application/problem+json).
