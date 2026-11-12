@@ -67,6 +67,9 @@ type changePasswordRequest struct {
 // userResponse is the API projection of a user: credential material is
 // never serialized. The verification timestamps let clients render the
 // "verify your account" state without a second endpoint (issue #86).
+// VerificationStatus (issue #166) is the technician skill-verification
+// attribute: null while never assessed, the lifecycle enum otherwise — it
+// rides every user projection (self profile and admin listing alike).
 type userResponse struct {
 	ID              uuid.UUID `json:"id"`
 	Email           string    `json:"email"`
@@ -76,7 +79,10 @@ type userResponse struct {
 	Roles           []string  `json:"roles"`
 	EmailVerifiedAt *string   `json:"email_verified_at"`
 	PhoneVerifiedAt *string   `json:"phone_verified_at"`
-	CreatedAt       string    `json:"created_at"`
+	// VerificationStatus is null until the technician's first verification
+	// decision; readers treat null as "unverified" (issue #166).
+	VerificationStatus *string `json:"verification_status"`
+	CreatedAt          string  `json:"created_at"`
 }
 
 // formatTimePtr projects an optional timestamp onto the wire format used
@@ -95,16 +101,22 @@ func newUserResponse(u User) userResponse {
 	for _, r := range u.Roles {
 		roles = append(roles, string(r))
 	}
+	var verificationStatus *string
+	if u.VerificationStatus != "" {
+		status := u.VerificationStatus
+		verificationStatus = &status
+	}
 	return userResponse{
-		ID:              u.ID,
-		Email:           u.Email,
-		Phone:           u.Phone,
-		FullName:        u.FullName,
-		Status:          u.Status,
-		Roles:           roles,
-		EmailVerifiedAt: formatTimePtr(u.EmailVerifiedAt),
-		PhoneVerifiedAt: formatTimePtr(u.PhoneVerifiedAt),
-		CreatedAt:       u.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
+		ID:                 u.ID,
+		Email:              u.Email,
+		Phone:              u.Phone,
+		FullName:           u.FullName,
+		Status:             u.Status,
+		Roles:              roles,
+		EmailVerifiedAt:    formatTimePtr(u.EmailVerifiedAt),
+		PhoneVerifiedAt:    formatTimePtr(u.PhoneVerifiedAt),
+		VerificationStatus: verificationStatus,
+		CreatedAt:          u.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
 	}
 }
 
@@ -258,6 +270,17 @@ func Routes(r chi.Router, svc *Service, limiter platform.AuthLimiter) {
 		[]string{string(RoleAdmin), string(RoleSuperAdmin)},
 		handleListAudit(svc),
 	))
+	// Technician skill-verification (issue #166): staff-only approve/reject
+	// decisions and the technician's own status read. The staff gate lives
+	// in the service (authz.go matrix) so refused attempts are AUDITED —
+	// a middleware-only gate could not produce the 403+audit behaviour the
+	// issue requires. The self-read is scoped to the caller by construction.
+	r.Post("/v1/admin/technicians/{technicianID}/verification/approve",
+		platform.RequireAuthenticated(handleTechnicianVerificationApprove(svc)))
+	r.Post("/v1/admin/technicians/{technicianID}/verification/reject",
+		platform.RequireAuthenticated(handleTechnicianVerificationReject(svc)))
+	r.Get("/v1/technician/verification-status",
+		platform.RequireAuthenticated(handleTechnicianVerificationStatus(svc)))
 }
 
 // handleRegister creates an account and returns the first token pair (201).

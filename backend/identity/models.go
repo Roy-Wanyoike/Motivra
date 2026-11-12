@@ -37,6 +37,35 @@ const (
 	StatusDeleted   = "deleted"
 )
 
+// Technician skill-verification lifecycle values (issue #166), stored in
+// the users.verification_status column. The empty string on the User
+// struct means "never assessed" — the column is NULL — and every reader
+// (profile read model, GET /v1/technician/verification-status) renders it
+// as VerificationStatusUnverified. Only "verified" means dispatch-eligible
+// (issue #167 fails closed on every other value, so "pending" and
+// "rejected" are safe lifecycle extensions); the vocabulary is owned by
+// this domain and documented as the contract of record in
+// contracts/identity/openapi.yaml.
+const (
+	VerificationStatusUnverified = "unverified"
+	VerificationStatusPending    = "pending"
+	VerificationStatusVerified   = "verified"
+	VerificationStatusRejected   = "rejected"
+)
+
+// IsValidVerificationStatus reports whether status is one of the fixed
+// verification lifecycle values. The empty string (never assessed) is a
+// valid STORAGE state but not a valid DECISION: status writes go through
+// the approve/reject API and always carry an explicit value.
+func IsValidVerificationStatus(status string) bool {
+	switch status {
+	case VerificationStatusUnverified, VerificationStatusPending,
+		VerificationStatusVerified, VerificationStatusRejected:
+		return true
+	}
+	return false
+}
+
 // User is an identity account. PasswordHash is the PHC-encoded argon2id
 // string and is never serialized to clients; Profile clears it.
 // EmailVerifiedAt and PhoneVerifiedAt are nil until the corresponding
@@ -53,8 +82,13 @@ type User struct {
 	Roles           []Role
 	EmailVerifiedAt *time.Time
 	PhoneVerifiedAt *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// VerificationStatus is the technician skill-verification attribute
+	// (issue #166): empty means never assessed (the column is NULL and
+	// readers render "unverified"). It is written only by the verification
+	// API together with its append-only decision record and audit entry.
+	VerificationStatus string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // verificationSatisfied reports whether every contact channel the account
@@ -128,6 +162,26 @@ type VerificationToken struct {
 	ExpiresAt  time.Time
 	ConsumedAt *time.Time
 	CreatedAt  time.Time
+}
+
+// TechnicianVerification is one append-only skill-verification decision
+// (issue #166): a staff principal records an approve/reject outcome for a
+// technician, with a reason and credential-evidence REFERENCES (never the
+// evidence itself). Rows are never mutated — a correction is a new
+// superseding row — and every row commits together with its audit_log
+// entry and the users.verification_status update in one transaction.
+// AssessmentTemplateID and AssessmentSessionID reference the Inspections
+// context by id only (no cross-domain FKs, ADR-0003).
+type TechnicianVerification struct {
+	ID                   uuid.UUID
+	TechnicianID         uuid.UUID
+	Status               string
+	Reason               string
+	ActorID              uuid.UUID
+	AssessmentTemplateID *uuid.UUID
+	AssessmentSessionID  *uuid.UUID
+	EvidenceRefs         []string
+	CreatedAt            time.Time
 }
 
 // HighestRole returns the highest-priority role among the given roles using

@@ -27,6 +27,10 @@ type fakeStore struct {
 	verification       map[uuid.UUID]VerificationToken
 	verificationByHash map[string]uuid.UUID
 	audits             []AuditEntry
+	// technicianVerifications is the append-only decision trail of issue
+	// #166, in insertion order (the fake's clock makes that created_at
+	// order too).
+	technicianVerifications []TechnicianVerification
 	// auditTimes records each audit row's insertion time in lockstep
 	// with audits, backing the ListAudit read model (issue #88).
 	auditTimes []time.Time
@@ -495,6 +499,69 @@ func (f *fakeStore) auditsByAction(action string) []AuditEntry {
 	for _, a := range f.audits {
 		if a.Action == action {
 			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// InsertTechnicianVerification mirrors the SQL store's transactional seam
+// in memory (issue #166): the decision record, the users.verification_status
+// stamp and the audit row are applied together or not at all. failAudit
+// therefore leaves the record table and the status column untouched, which
+// is what the fail-closed unit test asserts.
+func (f *fakeStore) InsertTechnicianVerification(_ context.Context, rec *TechnicianVerification, audit AuditEntry) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if rec == nil {
+		return errors.New("record is required")
+	}
+	if audit.Action == "" || audit.ObjectType == "" || audit.ObjectID == "" {
+		return platform.ErrValidation("audit entry is incomplete",
+			platform.FieldError{Field: "action", Issue: "required"})
+	}
+	if f.failAudit {
+		return errors.New("injected audit failure")
+	}
+	if rec.ID == uuid.Nil {
+		rec.ID = uuid.New()
+	}
+	now := time.Now()
+	rec.CreatedAt = now
+	f.technicianVerifications = append(f.technicianVerifications, *rec)
+	u, ok := f.users[rec.TechnicianID]
+	if !ok {
+		return ErrUserNotFound
+	}
+	u.VerificationStatus = rec.Status
+	u.UpdatedAt = now
+	f.users[rec.TechnicianID] = u
+	f.audits = append(f.audits, audit)
+	f.auditTimes = append(f.auditTimes, now)
+	return nil
+}
+
+// LatestTechnicianVerification returns the technician's newest decision
+// record (insertion order matches created_at for the fake's clock).
+func (f *fakeStore) LatestTechnicianVerification(_ context.Context, technicianID uuid.UUID) (TechnicianVerification, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.technicianVerifications) - 1; i >= 0; i-- {
+		if f.technicianVerifications[i].TechnicianID == technicianID {
+			return f.technicianVerifications[i], true, nil
+		}
+	}
+	return TechnicianVerification{}, false, nil
+}
+
+// technicianVerificationsFor returns every decision record appended for a
+// technician, oldest first (test probe for the append-only trail).
+func (f *fakeStore) technicianVerificationsFor(technicianID uuid.UUID) []TechnicianVerification {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []TechnicianVerification
+	for _, rec := range f.technicianVerifications {
+		if rec.TechnicianID == technicianID {
+			out = append(out, rec)
 		}
 	}
 	return out
