@@ -16,6 +16,10 @@ for Motivra. See `docs/ARCHITECTURE.md` §2 and ADR-0004 (security baseline).
   and every context's `authz` matrix.
 - **The audit trail**: append-only `audit_log`; security-relevant failures
   (including audit write failures) fail the request.
+- **Technician skill-verification** (issue #166): the server-authoritative
+  `unverified | pending | verified | rejected` lifecycle attribute on the
+  technician profile, its append-only decision records and the staff-only,
+  audit-logged verification API.
 
 Everyone else **validates** tokens through `backend/platform`
 (`NewJWTValidator` + `AuthMiddleware`) — issuance never leaks out of here.
@@ -30,6 +34,9 @@ Everyone else **validates** tokens through `backend/platform`
 | POST | `/v1/auth/logout` | public (refresh token = credential) | Revoke session, 204; unknown/revoked tokens get 401, not 404 |
 | GET | `/v1/users/me` | bearer | Authenticated profile (hash never serialized) |
 | GET | `/v1/admin/users` | bearer + ADMIN/SUPER_ADMIN | Paginated account listing (`?limit` 1-100 default 20, `?offset`) |
+| GET | `/v1/technician/verification-status` | bearer | The caller's verification status + newest decision record (issue #166) |
+| POST | `/v1/admin/technicians/{technicianID}/verification/approve` | bearer + staff matrix | Record a VERIFIED outcome: decision record + status stamp + audit entry in one transaction (issue #166) |
+| POST | `/v1/admin/technicians/{technicianID}/verification/reject` | bearer + staff matrix | Record a REJECTED outcome (reason required), same transactional seam (issue #166) |
 
 Errors are always `platform.ErrX` values rendered as
 `application/problem+json` by `platform.WriteError`. Client IPs for audit
@@ -44,6 +51,14 @@ SUPPORT > FLEET_ADMIN > GARAGE > DISPATCHER > TECHNICIAN > CUSTOMER) and
 `roles` (all grants); platform `RequireRole` gates coarse permissions per
 route. Middleware is never the only check for sensitive resources.
 
+**Verification decisions (issue #166)**: ADMIN and SUPER_ADMIN only — the
+decision of record reuses the fixed role set (no dedicated VERIFIER role;
+see `authz.go` for the enumerated matrix and its test). The gate lives in
+the SERVICE, not the middleware, so a refused attempt is itself audited
+(`identity.technician.verification.denied`) — the issue requires the 403 to
+leave an audit trail. Self-decisions are denied (separation of duties), and
+the target must hold the TECHNICIAN role (anything else reads 404).
+
 ## Audit actions
 
 Written to `audit_log` for every register, login, refresh (rotation),
@@ -53,6 +68,15 @@ logout (both refresh-token and session-id paths) and role grant:
 `identity.role.granted`. Entries carry actor, object, tenant (when
 applicable) and metadata (device, IP, email on registration). **Audit
 failures fail the request** — signals are never dropped silently.
+
+Technician verification (issue #166) adds
+`identity.technician.verification.approved` / `.rejected` (object
+`technician_verification`, metadata: technician, status, redacted reason,
+evidence references, previous status) and `.denied` for refused attempts.
+Each decision commits its record, the `users.verification_status` stamp and
+the audit row in ONE transaction (fail-closed seam, proven by integration
+test); `technician_verifications` is append-only (DB trigger) and covered
+by `make integrity-check`.
 
 ## Events (ADR-0002)
 
@@ -100,7 +124,8 @@ tracing flush).
 ## Migrations
 
 Paired `NNNNNN_name.{up,down}.sql` under `backend/migrations/identity/`
-(users, user_roles, sessions, audit_log). Backward-compatible changes only
+(users, user_roles, sessions, audit_log, verification_tokens,
+technician_verifications). Backward-compatible changes only
 (expand, migrate, contract); down files are the rollback path.
 
 ## Do NOT

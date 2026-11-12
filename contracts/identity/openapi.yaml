@@ -24,6 +24,10 @@ tags:
     description: Authenticated account access and admin listing.
   - name: audit
     description: Admin read surface over the append-only audit trail (issue 88, ADR-0004).
+  - name: technician-verification
+    description: >-
+      Technician skill-verification status and decisions (issue #166) —
+      staff-only, audit-logged writes; the technician reads their own status.
 paths:
   /v1/auth/register:
     post:
@@ -611,7 +615,172 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /v1/technician/verification-status:
+    get:
+      operationId: getTechnicianVerificationStatus
+      tags: [technician-verification]
+      summary: The caller's own verification status
+      description: |
+        Returns the authenticated caller's current verification lifecycle
+        (issue #166): the status plus the newest decision record when one
+        exists. The subject is always the caller — there is no technician
+        id parameter, so the read cannot be widened. Technicians who were
+        never assessed read as `unverified` with null timestamps and a null
+        record (the fail-closed default dispatch relies on).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The caller's verification status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicianVerificationStatusRead'
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/admin/technicians/{technicianID}/verification/approve:
+    post:
+      operationId: approveTechnicianVerification
+      tags: [technician-verification]
+      summary: Record a VERIFIED outcome for a technician (staff only, audit-logged)
+      description: |
+        A verifier-role operator (ADMIN or SUPER_ADMIN — the role decision of
+        record for #166: verification reuses the fixed role set, no dedicated
+        VERIFIER role) grants the technician's skill verification.
+
+        One transaction writes the append-only decision record, stamps
+        `users.verification_status` to `verified` and appends the
+        `identity.technician.verification.approved` audit_log entry (actor,
+        target, redacted reason, evidence references, previous status) — a
+        failed audit write fails the request and changes nothing
+        (ADR-0004 fail-closed auditing). Records are never mutated; a later
+        decision appends a new superseding record.
+
+        Authorization is enforced in the service, not only at the
+        middleware, so a refused attempt is itself audited
+        (`identity.technician.verification.denied`): any other role —
+        including the technician themselves — gets 403, and an actor can
+        never decide their own status (separation of duties).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TechnicianID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TechnicianVerificationDecision'
+      responses:
+        '201':
+          description: Outcome recorded; record + status stamp + audit entry committed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicianVerificationRecord'
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Caller's role may not record decisions, or self-verification (audited).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Unknown technician, or the target holds no TECHNICIAN role.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Malformed ids or out-of-bounds input.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: The decision could not be committed with its audit row; nothing changed.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /v1/admin/technicians/{technicianID}/verification/reject:
+    post:
+      operationId: rejectTechnicianVerification
+      tags: [technician-verification]
+      summary: Record a REJECTED outcome for a technician (staff only, audit-logged)
+      description: |
+        Same discipline as approve, recording `rejected`: a non-empty
+        `reason` is REQUIRED (a rejection without a reason is unusable to
+        the technician), the audit action is
+        `identity.technician.verification.rejected`, and the technician's
+        status stamp follows the newest record. `rejected` is
+        dispatch-ineligible (fail-closed).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TechnicianID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TechnicianVerificationDecision'
+      responses:
+        '201':
+          description: Outcome recorded; record + status stamp + audit entry committed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicianVerificationRecord'
+        '401':
+          description: Missing or invalid access token.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Caller's role may not record decisions, or self-verification (audited).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Unknown technician, or the target holds no TECHNICIAN role.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Malformed ids, missing reason or out-of-bounds input.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: The decision could not be committed with its audit row; nothing changed.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 components:
+  parameters:
+    TechnicianID:
+      name: technicianID
+      in: path
+      required: true
+      description: The assessed technician's account id (must hold the TECHNICIAN role).
+      schema:
+        type: string
+        format: uuid
   securitySchemes:
     bearerAuth:
       type: http
@@ -729,9 +898,139 @@ components:
           format: date-time
           nullable: true
           description: When the phone channel was verified; null while absent or unverified (issue #86).
+        verification_status:
+          $ref: '#/components/schemas/TechnicianVerificationStatus'
+          nullable: true
+          description: >-
+            Technician skill-verification lifecycle attribute (issue #166).
+            Null while never assessed (reads as unverified); set only by the
+            audit-logged verification API. Only `verified` is
+            dispatch-eligible (issue #167 fails closed on every other value).
         created_at:
           type: string
           format: date-time
+    TechnicianVerificationStatus:
+      type: string
+      enum: [unverified, pending, verified, rejected]
+      description: |
+        Server-authoritative technician verification lifecycle (issue #166) —
+        CONTRACT OF RECORD, owned by the identity context (ADR-0002:
+        producers own schemas).
+
+        - `unverified` — no live verification (the lifecycle start; also the
+          rendering of a null attribute).
+        - `pending` — an assessment is scheduled/in progress (reserved for
+          the assessment-scheduling flow; fail-closed for dispatch).
+        - `verified` — a live credential granted by a staff verifier; the
+          ONLY dispatch-eligible value (issue #167 verified-only gate).
+        - `rejected` — the latest assessment outcome was a rejection.
+
+        Status changes are append-only decision records
+        (`technician_verifications`) written with their audit_log entry in
+        one transaction; the current status is their newest outcome. The
+        draft technician contract (contracts/technician/openapi.yaml) spells
+        the second state `assessment_pending` — that draft maps here;
+        consumers MUST treat every non-`verified` value as ineligible
+        (fail-closed), which makes both `pending` and `rejected` safe
+        extensions.
+    TechnicianVerificationDecision:
+      type: object
+      description: >
+        One staff verification decision (issue #166). The endpoint decides
+        the recorded status (approve -> verified, reject -> rejected); the
+        body carries the rationale and the credential-evidence REFERENCES.
+        Evidence is referenced, never stored: assessment ids point into the
+        Inspections context by id only (no cross-domain FKs, ADR-0003) and
+        evidence refs are opaque handles — no signed URLs, no documents,
+        nothing PII (docs/PII-HANDLING.md).
+      required: []
+      properties:
+        reason:
+          type: string
+          maxLength: 2000
+          description: >
+            Verifier rationale. REQUIRED for reject (a rejection without a
+            reason is unusable to the technician); optional for approve.
+            Stored in the decision record; only the platform-redacted
+            projection enters audit metadata.
+        assessment_template_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Inspections template used as the assessment rubric (referenced by id only).
+        assessment_session_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The Inspections session that ran the assessment (referenced by id only).
+        evidence_refs:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 128
+          description: Opaque credential-evidence handles (at most 20, each 1-128 chars).
+    TechnicianVerificationRecord:
+      type: object
+      description: >
+        One append-only verification decision row (issue #166) — write-once
+        at the database level (append-only trigger); a correction is a NEW
+        superseding row and the newest record per technician wins.
+      required: [id, technician_id, status, reason, actor_id, evidence_refs, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        technician_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/TechnicianVerificationStatus'
+        reason:
+          type: string
+          description: The verifier's rationale (empty for reason-less approvals).
+        actor_id:
+          type: string
+          format: uuid
+          description: The acting staff principal (audit attribution).
+        assessment_template_id:
+          type: string
+          format: uuid
+          nullable: true
+        assessment_session_id:
+          type: string
+          format: uuid
+          nullable: true
+        evidence_refs:
+          type: array
+          items:
+            type: string
+          description: Always an array (never null), possibly empty.
+        created_at:
+          type: string
+          format: date-time
+    TechnicianVerificationStatusRead:
+      type: object
+      description: The caller's verification status read model (GET /v1/technician/verification-status).
+      required: [technician_id, status, updated_at, verification]
+      properties:
+        technician_id:
+          type: string
+          format: uuid
+          description: Always the authenticated caller (the read cannot be widened).
+        status:
+          $ref: '#/components/schemas/TechnicianVerificationStatus'
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the newest decision was recorded; null while never assessed.
+        verification:
+          allOf:
+            - $ref: '#/components/schemas/TechnicianVerificationRecord'
+          nullable: true
+          description: The newest decision record; null while never assessed.
     VerifyRequest:
       type: object
       required: [token]

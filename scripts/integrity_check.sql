@@ -14,6 +14,7 @@
 
 -- Per-table record counts (the before/after evidence for any cleanup).
 SELECT 'users' AS table, count(*) AS rows FROM users
+UNION ALL SELECT 'technician_verifications', count(*) FROM technician_verifications
 UNION ALL SELECT 'user_roles', count(*) FROM user_roles
 UNION ALL SELECT 'sessions', count(*) FROM sessions
 UNION ALL SELECT 'audit_log', count(*) FROM audit_log
@@ -77,7 +78,24 @@ BEGIN
       );
     IF orphans > 0 THEN RAISE EXCEPTION 'jobs whose status diverges from transition trail: %', orphans; END IF;
 
-    -- 9) Append-only enforcement must be armed.
+    -- 9) Technician verification records must reference live users.
+    SELECT count(*) INTO orphans FROM technician_verifications v
+    LEFT JOIN users u ON u.id = v.technician_id WHERE u.id IS NULL;
+    IF orphans > 0 THEN RAISE EXCEPTION 'orphan technician_verifications: %', orphans; END IF;
+
+    -- 10) Every technician whose verification record trail exists must
+    --     carry the newest record's status as their current status.
+    SELECT count(*) INTO orphans FROM users u
+    WHERE EXISTS (SELECT 1 FROM technician_verifications v WHERE v.technician_id = u.id)
+      AND u.verification_status IS DISTINCT FROM (
+          SELECT v.status FROM technician_verifications v
+          WHERE v.technician_id = u.id
+          ORDER BY v.created_at DESC, v.id DESC
+          LIMIT 1
+      );
+    IF orphans > 0 THEN RAISE EXCEPTION 'users whose verification_status diverges from the decision trail: %', orphans; END IF;
+
+    -- 11) Append-only enforcement must be armed.
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'audit_log_append_only' AND NOT tgisinternal) THEN
         RAISE EXCEPTION 'audit_log_append_only trigger missing';
     END IF;
@@ -86,6 +104,9 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'vehicle_service_history_append_only' AND NOT tgisinternal) THEN
         RAISE EXCEPTION 'vehicle_service_history_append_only trigger missing';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'technician_verifications_append_only' AND NOT tgisinternal) THEN
+        RAISE EXCEPTION 'technician_verifications_append_only trigger missing';
     END IF;
 
     RAISE NOTICE 'integrity check: all orphan counts are zero, append-only triggers armed';
