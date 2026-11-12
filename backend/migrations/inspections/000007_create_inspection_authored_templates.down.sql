@@ -1,0 +1,5 @@
+DROP TRIGGER IF EXISTS inspection_authored_templates_guard_trg ON inspection_authored_templates;
+DROP FUNCTION IF EXISTS inspection_authored_templates_guard();
+DROP INDEX IF EXISTS inspection_authored_templates_tenant_idx;
+DROP INDEX IF EXISTS inspection_authored_templates_published_idx;
+DROP TABLE IF EXISTS inspection_authored_templates;

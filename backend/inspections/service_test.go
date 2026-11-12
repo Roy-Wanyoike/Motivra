@@ -36,16 +36,22 @@ type fakeStore struct {
 	// #185); both slices stay append-only.
 	verifications      []ReportVerificationRecord
 	verificationAudits []ReportVerificationAudit
-	now                time.Time
+	// authoredTemplates and authoredTemplateAudits mirror the authored
+	// template lifecycle (issue #184) including the atomic transition+audit
+	// transaction.
+	authoredTemplates      map[uuid.UUID]AuthoredTemplate
+	authoredTemplateAudits []AuthoredTemplateAudit
+	now                    time.Time
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		sessions: make(map[uuid.UUID]Session),
-		findings: make(map[uuid.UUID]Finding),
-		evidence: make(map[uuid.UUID]Evidence),
-		reports:  make(map[uuid.UUID]Report),
-		now:      time.Now().UTC(),
+		sessions:          make(map[uuid.UUID]Session),
+		findings:          make(map[uuid.UUID]Finding),
+		evidence:          make(map[uuid.UUID]Evidence),
+		reports:           make(map[uuid.UUID]Report),
+		authoredTemplates: make(map[uuid.UUID]AuthoredTemplate),
+		now:               time.Now().UTC(),
 	}
 }
 
@@ -1018,4 +1024,137 @@ func TestNilMetricsAndNilPublisherAreSafe(t *testing.T) {
 // unmarshalPayload decodes an envelope payload into out.
 func unmarshalPayload(raw json.RawMessage, out any) error {
 	return json.Unmarshal(raw, out)
+}
+
+// ---- authored templates (issue #184) ----
+
+func (f *fakeStore) CreateAuthoredTemplate(_ context.Context, t *AuthoredTemplate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	// Mirror the one-published-version-per-(tenant,name) index for drafts
+	// is unnecessary (drafts don't collide); stamp and store.
+	t.CreatedAt, t.UpdatedAt = f.stamp(), f.stamp()
+	f.authoredTemplates[t.ID] = *t
+	return nil
+}
+
+func (f *fakeStore) GetAuthoredTemplate(_ context.Context, id uuid.UUID, scope Scope) (AuthoredTemplate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.authoredTemplates[id]
+	if !ok || !authoredTemplateVisible(t, scope) {
+		return AuthoredTemplate{}, fmt.Errorf("inspections: get authored template %s: %w", id, ErrAuthoredTemplateNotFound)
+	}
+	return t, nil
+}
+
+func (f *fakeStore) ListAuthoredTemplates(_ context.Context, scope Scope, status *AuthoredTemplateStatus, limit, offset int) ([]AuthoredTemplate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	out := []AuthoredTemplate{}
+	// Newest first (created_at DESC, id DESC), mirroring the SQL ordering.
+	var ids []uuid.UUID
+	for id, t := range f.authoredTemplates {
+		if !authoredTemplateVisible(t, scope) {
+			continue
+		}
+		if status != nil && t.Status != *status {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		ti, tj := f.authoredTemplates[ids[i]], f.authoredTemplates[ids[j]]
+		if !ti.CreatedAt.Equal(tj.CreatedAt) {
+			return ti.CreatedAt.After(tj.CreatedAt)
+		}
+		return ids[i].String() > ids[j].String()
+	})
+	for _, id := range ids[offset:] {
+		if len(out) == limit {
+			break
+		}
+		out = append(out, f.authoredTemplates[id])
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpdateAuthoredTemplateDraft(_ context.Context, t *AuthoredTemplate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stored, ok := f.authoredTemplates[t.ID]
+	if !ok {
+		return fmt.Errorf("inspections: update authored template: %w", ErrAuthoredTemplateNotFound)
+	}
+	if stored.Status != AuthoredDraft {
+		return fmt.Errorf("inspections: update authored template: template is not a draft: %w", ErrConflict)
+	}
+	stored.Name, stored.Content = t.Name, t.Content
+	stored.UpdatedAt = f.stamp()
+	f.authoredTemplates[t.ID] = stored
+	*t = stored
+	return nil
+}
+
+func (f *fakeStore) TransitionAuthoredTemplate(_ context.Context, id uuid.UUID, newStatus AuthoredTemplateStatus, current *AuthoredTemplate, audit *AuthoredTemplateAudit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stored, ok := f.authoredTemplates[id]
+	if !ok {
+		return fmt.Errorf("inspections: transition authored template: %w", ErrAuthoredTemplateNotFound)
+	}
+	// Mirror the service-level predecessor checks and the DB guard trigger.
+	valid := (stored.Status == AuthoredDraft && newStatus == AuthoredPublished) ||
+		(stored.Status == AuthoredPublished && newStatus == AuthoredRetired)
+	if !valid {
+		return fmt.Errorf("inspections: transition authored template: invalid transition %s -> %s: %w", stored.Status, newStatus, ErrConflict)
+	}
+	if newStatus == AuthoredPublished {
+		// One published version per (tenant_id, name).
+		for _, other := range f.authoredTemplates {
+			if other.ID != id && other.TenantID == stored.TenantID && other.Name == stored.Name && other.Status == AuthoredPublished {
+				return fmt.Errorf("inspections: transition authored template: %w", ErrTemplateNameTaken)
+			}
+		}
+	}
+	stored.Status = newStatus
+	now := f.stamp()
+	if newStatus == AuthoredPublished {
+		stored.PublishedAt = &now
+		stored.ContentHash = current.ContentHash
+	} else {
+		stored.RetiredAt = &now
+	}
+	stored.UpdatedAt = now
+	f.authoredTemplates[id] = stored
+	*current = stored
+	// Mirror the atomic record+audit transaction: a nil audit rolls the
+	// transition back (the service never sends one; the guard is pinned).
+	if audit == nil {
+		return fmt.Errorf("inspections: transition authored template: audit entry is required")
+	}
+	f.authoredTemplateAudits = append(f.authoredTemplateAudits, *audit)
+	return nil
+}
+
+// authoredTemplateVisible mirrors the PostgresStore scope predicate for
+// authored templates: tenant content, fail-closed.
+func authoredTemplateVisible(t AuthoredTemplate, scope Scope) bool {
+	switch {
+	case scope.Unrestricted():
+		return true
+	case scope.TenantID != nil:
+		return t.TenantID == *scope.TenantID
+	default:
+		return false
+	}
 }

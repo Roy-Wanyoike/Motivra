@@ -668,6 +668,130 @@ paths:
           $ref: '#/components/responses/NotFound'
         '422':
           $ref: '#/components/responses/ValidationError'
+  /v1/inspections/authored-templates:
+    get:
+      summary: List authored templates
+      description: >
+        Per-tenant authored checklists (issue #184). Author roles (ADMIN,
+        SUPER_ADMIN) may list every status; other roles are pinned to
+        published. Newest first; limit/offset pagination.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, published, retired]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: One page of authored templates.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuthoredTemplate'
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      summary: Create an authored template draft
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthoredTemplateInput'
+      responses:
+        '201':
+          description: Draft created (status draft, no hash yet).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthoredTemplate'
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/inspections/authored-templates/{templateID}:
+    parameters:
+      - name: templateID
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Get one authored template
+      description: Drafts are author-role reads; published and retired read like every template.
+      responses:
+        '200':
+          description: The template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthoredTemplate'
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      summary: Edit a draft
+      description: Drafts only; published templates are hash-pinned and immutable (409).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthoredTemplateInput'
+      responses:
+        '200':
+          description: Draft updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthoredTemplate'
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/inspections/authored-templates/{templateID}/publish:
+    post:
+      summary: Publish (hash-pin) a draft
+      description: >
+        Computes the SHA-256 of the canonical content JSON, freezes content,
+        name and hash (immutability guard trigger), and writes the audit
+        entry in the same transaction. 409 when the template is not a draft
+        or a published version of the same (tenant_id, name) is live.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Published template with content_hash.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthoredTemplate'
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/inspections/authored-templates/{templateID}/retire:
+    post:
+      summary: Retire a published template
+      description: >
+        Terminal transition: the hash stays pinned, the template becomes
+        unusable for new sessions and can never be resurrected. Audited.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Retired template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthoredTemplate'
+        '409': { $ref: '#/components/responses/Error' }
 components:
   parameters:
     SessionID:
@@ -728,6 +852,56 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Error'
+    AuthoredTemplateInput:
+      type: object
+      required: [name, content]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+        content:
+          type: object
+          description: >
+            Checklist content. Must be a JSON object with a non-empty items
+            array (max 200 entries). The pinned hash is computed over the
+            canonical (key-sorted) form.
+    AuthoredTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [draft, published, retired]
+        content:
+          type: object
+          description: Canonical checklist content (key-sorted).
+        content_hash:
+          type: string
+          description: Hex SHA-256 of the canonical content; set at publish, immutable afterwards.
+        created_by:
+          type: string
+          format: uuid
+        published_at:
+          type: string
+          format: date-time
+          nullable: true
+        retired_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
   securitySchemes:
     bearerAuth:
       type: http

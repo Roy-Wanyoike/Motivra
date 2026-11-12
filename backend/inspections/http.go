@@ -73,6 +73,11 @@ func Routes(r chi.Router, svc *Service, requireAuth func(http.HandlerFunc) http.
 	// object fetch is capability-gated. Registered in one place so the
 	// surface stays reviewable (media_http.go).
 	RegisterEvidenceMediaRoutes(r, svc, requireAuth)
+	// Authored template lifecycle (issue #184): per-tenant authoring on
+	// top of the system registry — draft, hash-pinned publish, retire.
+	// Registered in one place so the surface stays reviewable
+	// (templates_lifecycle_http.go).
+	RegisterAuthoredTemplateRoutes(r, svc, requireAuth)
 	r.Route("/v1/inspections/templates", func(r chi.Router) {
 		r.Get("/", requireAuth(svc.handleListTemplates))
 		r.Get("/{templateID}", requireAuth(svc.handleGetTemplate))
