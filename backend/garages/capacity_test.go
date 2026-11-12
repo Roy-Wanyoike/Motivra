@@ -30,12 +30,20 @@ type fakeStore struct {
 	mu       sync.Mutex
 	capacity map[uuid.UUID]Capacity
 	now      time.Time
+	// appointments and appointmentAudits mirror the atomic
+	// write+audit_log transactions of the appointments aggregate (issue
+	// #169); the audit slice stays append-only. failAudit simulates an
+	// unavailable audit_log: the whole write must fail.
+	appointments      map[uuid.UUID]Appointment
+	appointmentAudits []AppointmentAuditRecord
+	failAudit         bool
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		capacity: make(map[uuid.UUID]Capacity),
-		now:      time.Now().UTC(),
+		capacity:     make(map[uuid.UUID]Capacity),
+		appointments: make(map[uuid.UUID]Appointment),
+		now:          time.Now().UTC(),
 	}
 }
 

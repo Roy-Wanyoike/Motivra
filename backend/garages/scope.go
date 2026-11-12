@@ -14,6 +14,7 @@ import (
 // their cross-tenant read obligations.
 const (
 	RoleGarage     = "GARAGE"
+	RoleCustomer   = "CUSTOMER"
 	RoleDispatcher = "DISPATCHER"
 	RoleAdmin      = "ADMIN"
 	RoleSuperAdmin = "SUPER_ADMIN"

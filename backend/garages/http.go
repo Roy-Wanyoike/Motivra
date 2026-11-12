@@ -44,6 +44,8 @@ func Routes(r chi.Router, svc *Service, requireAuth func(http.HandlerFunc) http.
 		r.Get("/", requireAuth(platform.RequireRole(capacityWriteRoles, svc.handleGetCapacity)))
 		r.Put("/", requireAuth(platform.RequireRole(capacityWriteRoles, svc.handlePutCapacity)))
 	})
+	// Appointments (issue #169): the calendar tied to service requests.
+	svc.appointmentRoutes(r, requireAuth)
 }
 
 // capacityRequest is the PUT /v1/garage/capacity body. All four fields are

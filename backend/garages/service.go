@@ -45,11 +45,20 @@ type CapacityUpdatedPayload struct {
 type Service struct {
 	store     Store
 	publisher platform.Publisher
+	// appointments is the second aggregate seam (#169). It is resolved from
+	// store at construction: every Store in this package also implements
+	// AppointmentStore (the PostgresStore and the test fakes); a store that
+	// does not leaves it nil and the appointment surface fails closed.
+	appointments AppointmentStore
 }
 
 // NewService returns a Service over store. publisher may be nil.
 func NewService(store Store, publisher platform.Publisher) *Service {
-	return &Service{store: store, publisher: publisher}
+	svc := &Service{store: store, publisher: publisher}
+	if appts, ok := store.(AppointmentStore); ok {
+		svc.appointments = appts
+	}
+	return svc
 }
 
 // Capacity returns the tenant's declared capacity. A tenant that has never

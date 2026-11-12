@@ -2,8 +2,10 @@ package inspections
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -122,6 +124,39 @@ type Store interface {
 	// ListReportVerifications returns the session's verification records in
 	// chronological order (oldest first), for a session visible to scope.
 	ListReportVerifications(ctx context.Context, sessionID uuid.UUID, scope Scope) ([]ReportVerificationRecord, error)
+
+	// CreateAuthoredTemplate inserts the draft t (issue #184). It assigns
+	// t.ID when unset and populates t.CreatedAt and t.UpdatedAt.
+	CreateAuthoredTemplate(ctx context.Context, t *AuthoredTemplate) error
+
+	// GetAuthoredTemplate returns the template with the given id when it
+	// is visible to scope, or an error wrapping ErrAuthoredTemplateNotFound.
+	GetAuthoredTemplate(ctx context.Context, id uuid.UUID, scope Scope) (AuthoredTemplate, error)
+
+	// ListAuthoredTemplates returns up to limit templates visible to scope,
+	// optionally filtered by status, newest first (created_at DESC, id DESC).
+	// limit <= 0 selects defaultListLimit and limit is capped at
+	// maxListLimit; offset < 0 is treated as 0.
+	ListAuthoredTemplates(ctx context.Context, scope Scope, status *AuthoredTemplateStatus, limit, offset int) ([]AuthoredTemplate, error)
+
+	// UpdateAuthoredTemplateDraft edits name/content of a draft. It fails
+	// with an error wrapping ErrConflict when the stored row is not a
+	// draft (hash-pinned immutability) and with an error wrapping
+	// ErrAuthoredTemplateNotFound when it does not exist.
+	UpdateAuthoredTemplateDraft(ctx context.Context, t *AuthoredTemplate) error
+
+	// TransitionAuthoredTemplate moves the template from its stored status
+	// to newStatus (published or retired) and writes the platform audit_log
+	// entry audit in ONE transaction (issue #184): an audit failure rolls
+	// the transition back, so no publish/retire can ever exist without its
+	// audit trail (ADR-0004). current carries the transition timestamps and
+	// is repopulated from the database. It fails with an error wrapping
+	// ErrConflict when the stored status is not a valid predecessor
+	// (closing the concurrent-publisher race), with an error wrapping
+	// ErrTemplateNameTaken when publishing collides with a live published
+	// version of the same (tenant_id, name), and with an error wrapping
+	// ErrAuthoredTemplateNotFound when the template does not exist.
+	TransitionAuthoredTemplate(ctx context.Context, id uuid.UUID, newStatus AuthoredTemplateStatus, current *AuthoredTemplate, audit *AuthoredTemplateAudit) error
 }
 
 // PostgresStore implements Store on PostgreSQL through pgx.
@@ -676,6 +711,220 @@ func isForeignKeyViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		return pgErr.Code == "23503"
+	}
+	return false
+}
+
+// authoredTemplateScopePredicate renders the boundary condition for the
+// authored-templates table. Authored templates are tenant content: a
+// tenant-scoped caller sees their tenant's rows; a principal-scoped caller
+// without a tenant claim sees nothing (fail closed); operators see all.
+func authoredTemplateScopePredicate(scope Scope, nextParam int) (string, []any) {
+	switch {
+	case scope.Unrestricted():
+		return "", nil
+	case scope.TenantID != nil:
+		return fmt.Sprintf("tenant_id = $%d", nextParam), []any{*scope.TenantID}
+	default:
+		return "FALSE", nil
+	}
+}
+
+const authoredTemplateColumns = `id, tenant_id, name, status, content, content_hash, created_by,
+        published_at, retired_at, created_at, updated_at`
+
+func scanAuthoredTemplate(row pgx.Row) (AuthoredTemplate, error) {
+	var (
+		t   AuthoredTemplate
+		str sql.NullString
+	)
+	if err := row.Scan(&t.ID, &t.TenantID, &t.Name, &t.Status, &t.Content, &str, &t.CreatedBy,
+		&t.PublishedAt, &t.RetiredAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		return AuthoredTemplate{}, err
+	}
+	t.ContentHash = str.String
+	return t, nil
+}
+
+// CreateAuthoredTemplate implements Store.
+func (s *PostgresStore) CreateAuthoredTemplate(ctx context.Context, t *AuthoredTemplate) error {
+	if t == nil {
+		return fmt.Errorf("inspections: create authored template: template is required")
+	}
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	err := s.pool.QueryRow(ctx, `
+                INSERT INTO inspection_authored_templates
+                        (id, tenant_id, name, status, content, created_by)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING created_at, updated_at`,
+		t.ID, t.TenantID, t.Name, t.Status, t.Content, t.CreatedBy,
+	).Scan(&t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("inspections: create authored template: %w", err)
+	}
+	return nil
+}
+
+// GetAuthoredTemplate implements Store.
+func (s *PostgresStore) GetAuthoredTemplate(ctx context.Context, id uuid.UUID, scope Scope) (AuthoredTemplate, error) {
+	pred, predArgs := authoredTemplateScopePredicate(scope, 2)
+	where := "id = $1"
+	args := []any{id}
+	if pred != "" {
+		where += " AND " + pred
+		args = append(args, predArgs...)
+	}
+	t, err := scanAuthoredTemplate(s.pool.QueryRow(ctx, `
+                SELECT `+authoredTemplateColumns+`
+                FROM inspection_authored_templates
+                WHERE `+where, args...))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AuthoredTemplate{}, fmt.Errorf("inspections: get authored template %s: %w", id, ErrAuthoredTemplateNotFound)
+		}
+		return AuthoredTemplate{}, fmt.Errorf("inspections: get authored template: %w", err)
+	}
+	return t, nil
+}
+
+// ListAuthoredTemplates implements Store.
+func (s *PostgresStore) ListAuthoredTemplates(ctx context.Context, scope Scope, status *AuthoredTemplateStatus, limit, offset int) ([]AuthoredTemplate, error) {
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	if limit > maxListLimit {
+		limit = maxListLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	pred, predArgs := authoredTemplateScopePredicate(scope, 1)
+	where := "TRUE"
+	args := []any{}
+	if pred != "" {
+		where = pred
+		args = append(args, predArgs...)
+	}
+	if status != nil {
+		args = append(args, *status)
+		where += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	args = append(args, limit, offset)
+	rows, err := s.pool.Query(ctx, `
+                SELECT `+authoredTemplateColumns+`
+                FROM inspection_authored_templates
+                WHERE `+where+`
+                ORDER BY created_at DESC, id DESC
+                LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+	if err != nil {
+		return nil, fmt.Errorf("inspections: list authored templates: %w", err)
+	}
+	defer rows.Close()
+	out := []AuthoredTemplate{}
+	for rows.Next() {
+		t, err := scanAuthoredTemplate(rows)
+		if err != nil {
+			return nil, fmt.Errorf("inspections: list authored templates: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("inspections: list authored templates: %w", err)
+	}
+	return out, nil
+}
+
+// UpdateAuthoredTemplateDraft implements Store.
+func (s *PostgresStore) UpdateAuthoredTemplateDraft(ctx context.Context, t *AuthoredTemplate) error {
+	if t == nil {
+		return fmt.Errorf("inspections: update authored template: template is required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+                UPDATE inspection_authored_templates
+                SET name = $2, content = $3, updated_at = now()
+                WHERE id = $1 AND status = 'draft'`,
+		t.ID, t.Name, t.Content)
+	if err != nil {
+		return fmt.Errorf("inspections: update authored template: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Either missing (or invisible) or not a draft — disambiguate via
+		// a scoped read so the caller gets the accurate failure.
+		_, err := s.GetAuthoredTemplate(ctx, t.ID, UnrestrictedScope())
+		if err != nil {
+			return fmt.Errorf("inspections: update authored template: %w", ErrAuthoredTemplateNotFound)
+		}
+		return fmt.Errorf("inspections: update authored template: template is not a draft: %w", ErrConflict)
+	}
+	fresh, err := s.GetAuthoredTemplate(ctx, t.ID, UnrestrictedScope())
+	if err != nil {
+		return fmt.Errorf("inspections: update authored template: %w", err)
+	}
+	t.UpdatedAt = fresh.UpdatedAt
+	return nil
+}
+
+// TransitionAuthoredTemplate implements Store: the status transition and
+// its audit_log row commit in one transaction (ADR-0004).
+func (s *PostgresStore) TransitionAuthoredTemplate(ctx context.Context, id uuid.UUID, newStatus AuthoredTemplateStatus, current *AuthoredTemplate, audit *AuthoredTemplateAudit) error {
+	if current == nil || audit == nil {
+		// Fail closed: a publish/retire without its audit entry must never
+		// be written.
+		return fmt.Errorf("inspections: transition authored template: current state and audit entry are required")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("inspections: begin transition authored template: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var publishedAt, retiredAt *time.Time
+	var hash sql.NullString
+	err = tx.QueryRow(ctx, `
+                UPDATE inspection_authored_templates
+                SET status = $2,
+                    published_at = CASE WHEN $2 = 'published' THEN now() ELSE published_at END,
+                    retired_at   = CASE WHEN $2 = 'retired'  THEN now() ELSE retired_at END,
+                    updated_at   = now()
+                WHERE id = $1 AND status = $3
+                RETURNING `+authoredTemplateColumns,
+		id, newStatus, current.Status,
+	).Scan(&current.ID, &current.TenantID, &current.Name, &current.Status, &current.Content, &hash, &current.CreatedBy,
+		&publishedAt, &retiredAt, &current.CreatedAt, &current.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("inspections: transition authored template: template moved or missing: %w", ErrConflict)
+		}
+		if isUniqueViolation(err) {
+			return fmt.Errorf("inspections: transition authored template: %w", ErrTemplateNameTaken)
+		}
+		return fmt.Errorf("inspections: transition authored template: %w", err)
+	}
+	current.PublishedAt, current.RetiredAt = publishedAt, retiredAt
+	current.ContentHash = hash.String
+
+	if _, err := tx.Exec(ctx, `
+                INSERT INTO audit_log (actor_id, action, object_type, object_id, tenant_id, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6)`,
+		audit.ActorID, audit.Action, audit.ObjectType, audit.ObjectID, audit.TenantID, audit.Metadata,
+	); err != nil {
+		return fmt.Errorf("inspections: transition authored template audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("inspections: commit transition authored template: %w", err)
+	}
+	return nil
+}
+
+// isUniqueViolation reports whether err is a PostgreSQL unique violation
+// (23505) — the published-versions-per-name index (issue #184).
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
 	}
 	return false
 }
